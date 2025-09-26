@@ -19,7 +19,10 @@ export function getDatabase(): BetterSqliteDatabase {
   if (!fs.existsSync(dir)) {
     throw new Error(`Database directory missing: ${dir}`);
   }
+  if (!fs.existsSync(dbPath)) {
+    throw new Error(`SQLite database not found at ${dbPath}. Did the indexer run yet?`);
+  }
 
-  singleton = new Database(dbPath, { readonly: true, fileMustExist: false });
+  singleton = new Database(dbPath, { readonly: true, fileMustExist: true });
   return singleton;
 }

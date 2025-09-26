@@ -107,6 +107,7 @@ function MarketsPanel({ markets, selected, onSelect }: MarketsPanelProps) {
               >
                 <div className="flex items-center justify-between gap-4">
                   <div>
+                    <p className="text-xs text-ink/60">Creator: {formatIdentity(market.creatorDisplayName, market.creatorXHandle, market.creator)}</p>
                     <p className="font-mono text-xs text-ink/80">{market.marketId}</p>
                     {market.outcomeNames.length > 0 ? (
                       <p className="text-sm font-semibold text-ink">
@@ -160,6 +161,9 @@ function MarketDetailPanel({ marketId, detail, loading }: MarketDetailPanelProps
       <header className="px-4 py-3 border-b border-ink/10">
         <h2 className="text-sm font-semibold uppercase tracking-wide">Market Detail</h2>
         <p className="font-mono text-xs text-ink/70 break-all">{market.marketId}</p>
+        <p className="text-xs text-ink/60 mt-1">Creator: {formatIdentity(market.creatorDisplayName, market.creatorXHandle, market.creator)}</p>
+        <p className="text-xs text-ink/60">Oracle: {shortenAddress(market.oracle)}</p>
+        <p className="text-xs text-ink/60">Surplus: {shortenAddress(market.surplusRecipient)}</p>
       </header>
       <div className="px-4 py-3 space-y-3">
         <div>
@@ -227,6 +231,7 @@ function BoostsPanel({ events }: BoostsPanelProps) {
                 <span>{formatTimestamp(event.ts)}</span>
               </div>
               <p className="mt-1 font-semibold capitalize">{event.type}</p>
+              <p className="text-xs text-ink/70">User: {formatIdentity(event.displayName, event.xHandle, event.user)}</p>
               {event.type === "sponsored" ? (
                 <SponsoredDetails payload={event.payload} />
               ) : (
@@ -265,7 +270,7 @@ function RewardsPanel({ events }: RewardsPanelProps) {
                 <p className="text-xs font-mono text-ink/70 break-all">{event.root}</p>
               ) : (
                 <div className="text-xs text-ink/70 mt-1 space-y-1">
-                  <p>User: <span className="font-mono">{event.user}</span></p>
+                  <p>User: {formatIdentity(event.displayName, event.xHandle, event.user)}</p>
                   <p>Amount: {event.amount ? formatUsdcMicro(event.amount) : "0"}</p>
                 </div>
               )}
@@ -297,6 +302,23 @@ function SponsoredDetails({ payload }: SponsoredDetailsProps) {
       <p>Subsidy Rate: {subsidyRate.toFixed(2)}%</p>
     </div>
   );
+}
+
+function shortenAddress(address: string | null | undefined): string {
+  if (!address) return "-";
+  const value = address.toLowerCase();
+  if (value.length <= 10) return value;
+  return `${value.slice(0, 6)}…${value.slice(-4)}`;
+}
+
+function formatIdentity(
+  displayName: string | null | undefined,
+  xHandle: string | null | undefined,
+  address: string | null | undefined
+): string {
+  if (displayName && displayName.trim().length > 0) return displayName.trim();
+  if (xHandle && xHandle.trim().length > 0) return `@${xHandle.trim()}`;
+  return shortenAddress(address);
 }
 
 function formatArray(value: unknown): string {

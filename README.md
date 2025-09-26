@@ -21,6 +21,8 @@ cd contracts && forge build && cd ..
 pnpm copy-abis
 ```
 
+> Tip: Re-run `pnpm copy-abis` whenever you rebuild the contracts to keep the generated ABIs in sync.
+
 Environment files are pre-populated for Base mainnet deployments:
 
 - `apps/indexer/.env`

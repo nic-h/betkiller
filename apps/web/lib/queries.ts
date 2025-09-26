@@ -12,6 +12,8 @@ export type MarketSummary = {
   latestPrices: string[];
   latestPriceUpdatedAt: number | null;
   usdcFlow24h: string;
+  creatorDisplayName: string | null;
+  creatorXHandle: string | null;
 };
 
 export type MarketDetail = {
@@ -24,6 +26,8 @@ export type MarketDetail = {
     createdAt: number;
     outcomeNames: string[];
     metadata: string | null;
+    creatorDisplayName: string | null;
+    creatorXHandle: string | null;
   };
   latestPrices: string[];
   latestPriceUpdatedAt: number | null;
@@ -36,6 +40,8 @@ export type VaultEvent = {
   user: string;
   type: string;
   payload: Record<string, unknown>;
+  displayName: string | null;
+  xHandle: string | null;
 };
 
 export type RewardEvent = {
@@ -45,6 +51,8 @@ export type RewardEvent = {
   user: string | null;
   amount: string | null;
   root: string | null;
+  displayName: string | null;
+  xHandle: string | null;
 };
 
 function parseOutcomeNames(raw: string | null): string[] {
@@ -61,8 +69,18 @@ export function loadMarkets(): MarketSummary[] {
   const db = getDatabase();
   const markets = db
     .prepare(
-      `SELECT marketId, creator, oracle, surplusRecipient, questionId, outcomeNames, metadata, createdAt
-       FROM markets
+      `SELECT m.marketId,
+              m.creator,
+              m.oracle,
+              m.surplusRecipient,
+              m.questionId,
+              m.outcomeNames,
+              m.metadata,
+              m.createdAt,
+              p.display_name AS creatorDisplayName,
+              p.x_handle AS creatorXHandle
+       FROM markets m
+       LEFT JOIN profiles p ON lower(p.address) = lower(m.creator)
        ORDER BY createdAt DESC`
     )
     .all() as {
@@ -74,6 +92,8 @@ export function loadMarkets(): MarketSummary[] {
     outcomeNames: string;
     metadata: string | null;
     createdAt: number;
+    creatorDisplayName: string | null;
+    creatorXHandle: string | null;
   }[];
 
   const latestPriceStmt = db.prepare(`SELECT pricesJson, ts FROM prices WHERE marketId = ? ORDER BY ts DESC LIMIT 1`);
@@ -101,7 +121,9 @@ export function loadMarkets(): MarketSummary[] {
       metadata: market.metadata,
       latestPrices,
       latestPriceUpdatedAt: priceRow?.ts ?? null,
-      usdcFlow24h: flow.toString()
+      usdcFlow24h: flow.toString(),
+      creatorDisplayName: market.creatorDisplayName,
+      creatorXHandle: market.creatorXHandle
     };
   });
 }
@@ -111,8 +133,19 @@ export function loadMarketDetail(marketId: string): MarketDetail | null {
   const id = marketId.toLowerCase();
   const market = db
     .prepare(
-      `SELECT marketId, creator, oracle, surplusRecipient, questionId, outcomeNames, metadata, createdAt
-       FROM markets WHERE marketId = ?`
+      `SELECT m.marketId,
+              m.creator,
+              m.oracle,
+              m.surplusRecipient,
+              m.questionId,
+              m.outcomeNames,
+              m.metadata,
+              m.createdAt,
+              p.display_name AS creatorDisplayName,
+              p.x_handle AS creatorXHandle
+       FROM markets m
+       LEFT JOIN profiles p ON lower(p.address) = lower(m.creator)
+       WHERE m.marketId = ?`
     )
     .get(id) as
     | {
@@ -124,6 +157,8 @@ export function loadMarketDetail(marketId: string): MarketDetail | null {
         outcomeNames: string;
         metadata: string | null;
         createdAt: number;
+        creatorDisplayName: string | null;
+        creatorXHandle: string | null;
       }
     | undefined;
 
@@ -146,7 +181,9 @@ export function loadMarketDetail(marketId: string): MarketDetail | null {
       questionId: market.questionId,
       createdAt: market.createdAt,
       outcomeNames: parseOutcomeNames(market.outcomeNames),
-      metadata: market.metadata
+      metadata: market.metadata,
+      creatorDisplayName: market.creatorDisplayName,
+      creatorXHandle: market.creatorXHandle
     },
     latestPrices: priceRow ? (JSON.parse(priceRow.pricesJson) as string[]) : [],
     latestPriceUpdatedAt: priceRow?.ts ?? null,
@@ -158,19 +195,36 @@ export function loadVaultEvents(limit = 50): VaultEvent[] {
   const db = getDatabase();
   const rows = db
     .prepare(
-      `SELECT ts, marketId, user, type, payloadJson
-       FROM locks
+      `SELECT l.ts,
+              l.marketId,
+              l.user,
+              l.type,
+              l.payloadJson,
+              p.display_name AS displayName,
+              p.x_handle AS xHandle
+       FROM locks l
+       LEFT JOIN profiles p ON lower(p.address) = lower(l.user)
        ORDER BY ts DESC
        LIMIT ?`
     )
-    .all(limit) as { ts: number; marketId: string; user: string; type: string; payloadJson: string }[];
+    .all(limit) as {
+      ts: number;
+      marketId: string;
+      user: string;
+      type: string;
+      payloadJson: string;
+      displayName: string | null;
+      xHandle: string | null;
+    }[];
 
   return rows.map((row) => ({
     ts: row.ts,
     marketId: row.marketId,
     user: row.user,
     type: row.type,
-    payload: JSON.parse(row.payloadJson) as Record<string, unknown>
+    payload: JSON.parse(row.payloadJson) as Record<string, unknown>,
+    displayName: row.displayName,
+    xHandle: row.xHandle
   }));
 }
 
@@ -178,8 +232,16 @@ export function loadRewardEvents(limit = 50): RewardEvent[] {
   const db = getDatabase();
   const rows = db
     .prepare(
-      `SELECT ts, kind, epochId, user, amount, root
-       FROM rewards
+      `SELECT r.ts,
+              r.kind,
+              r.epochId,
+              r.user,
+              r.amount,
+              r.root,
+              p.display_name AS displayName,
+              p.x_handle AS xHandle
+       FROM rewards r
+       LEFT JOIN profiles p ON lower(p.address) = lower(r.user)
        ORDER BY ts DESC
        LIMIT ?`
     )
@@ -190,6 +252,8 @@ export function loadRewardEvents(limit = 50): RewardEvent[] {
     user: string | null;
     amount: string | null;
     root: string | null;
+    displayName: string | null;
+    xHandle: string | null;
   }[];
 
   return rows.map((row) => ({
@@ -198,6 +262,8 @@ export function loadRewardEvents(limit = 50): RewardEvent[] {
     epochId: row.epochId,
     user: row.user,
     amount: row.amount,
-    root: row.root
+    root: row.root,
+    displayName: row.displayName,
+    xHandle: row.xHandle
   }));
 }

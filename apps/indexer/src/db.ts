@@ -95,6 +95,7 @@ CREATE INDEX IF NOT EXISTS idx_prices_market_ts ON prices(marketId, ts);
 CREATE INDEX IF NOT EXISTS idx_impact_market ON impact(marketId);
 CREATE INDEX IF NOT EXISTS idx_locks_ts ON locks(ts);
 CREATE INDEX IF NOT EXISTS idx_rewards_ts ON rewards(ts);
+CREATE INDEX IF NOT EXISTS idx_markets_createdAt ON markets(createdAt);
 `);
 
 type MetaKey = "last_block_synced";
@@ -228,3 +229,20 @@ ON CONFLICT(address) DO UPDATE SET
   x_handle = excluded.x_handle,
   last_seen = excluded.last_seen
 `);
+
+const selectProfileStmt = db.prepare('SELECT display_name as displayName, x_handle as xHandle, last_seen as lastSeen FROM profiles WHERE address = ?');
+const touchProfileStmt = db.prepare('UPDATE profiles SET last_seen = ? WHERE address = ?');
+
+export function getProfile(address: string): { displayName: string | null; xHandle: string | null; lastSeen: number } | undefined {
+  return selectProfileStmt.get(address) as
+    | {
+        displayName: string | null;
+        xHandle: string | null;
+        lastSeen: number;
+      }
+    | undefined;
+}
+
+export function touchProfile(address: string, timestamp: number) {
+  touchProfileStmt.run(timestamp, address);
+}

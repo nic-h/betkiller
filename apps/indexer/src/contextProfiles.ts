@@ -1,10 +1,13 @@
-import { upsertProfile } from "./db.js";
+import { getProfile, touchProfile, upsertProfile } from "./db.js";
 
 const BASE = process.env.CONTEXT_BASE || "https://context.markets";
+const PROFILE_TTL_SECONDS = Number(process.env.PROFILE_TTL_SECONDS ?? 86_400);
+const PROFILE_CONCURRENCY = Math.max(1, Number(process.env.PROFILE_CONCURRENCY ?? 4));
+const USER_AGENT = process.env.PROFILE_USER_AGENT ?? "ContextEdgeIndexer/1.0";
 
 async function tryJSON(url: string) {
   try {
-    const res = await fetch(url, { headers: { accept: "application/json" } });
+    const res = await fetch(url, { headers: { accept: "application/json", "user-agent": USER_AGENT } });
     if (!res.ok) return null;
     return await res.json();
   } catch (error) {
@@ -13,7 +16,7 @@ async function tryJSON(url: string) {
 }
 
 async function getText(url: string) {
-  const res = await fetch(url, { headers: { accept: "text/html" } });
+  const res = await fetch(url, { headers: { accept: "text/html", "user-agent": USER_AGENT } });
   if (!res.ok) {
     throw new Error(`fetch failed ${url}`);
   }
@@ -75,7 +78,23 @@ export async function resolveAndStoreProfiles(addresses: string[]) {
   if (addresses.length === 0) return;
 
   const now = Math.floor(Date.now() / 1000);
+  const normalized = Array.from(new Set(addresses.map((addr) => addr.toLowerCase())));
 
+  const toLookup: string[] = [];
+  for (const address of normalized) {
+    const existing = getProfile(address);
+    if (existing && typeof existing.lastSeen === "number" && now - existing.lastSeen < PROFILE_TTL_SECONDS) {
+      touchProfile(address, now);
+    } else {
+      toLookup.push(address);
+    }
+  }
+
+  if (toLookup.length === 0) {
+    return;
+  }
+
+  const resolved = new Set<string>();
   const candidates = [
     `${BASE}/api/leaderboard`,
     `${BASE}/api/leaderboard?period=overall`,
@@ -93,11 +112,16 @@ export async function resolveAndStoreProfiles(addresses: string[]) {
         x_handle: profile.x ?? null,
         last_seen: now
       });
+      resolved.add(profile.address.toLowerCase());
     }
   }
 
-  for (const original of addresses) {
-    const address = original.toLowerCase();
+  const remaining = toLookup.filter((addr) => !resolved.has(addr));
+  if (remaining.length === 0) {
+    return;
+  }
+
+  const tasks = remaining.map((address) => async () => {
     const pages = [
       `${BASE}/u/${address}`,
       `${BASE}/users/${address}`,
@@ -148,5 +172,15 @@ export async function resolveAndStoreProfiles(addresses: string[]) {
         last_seen: now
       });
     }
-  }
+  });
+
+  const queue = [...tasks];
+  const workers = Array.from({ length: Math.min(PROFILE_CONCURRENCY, queue.length) }, async function worker() {
+    while (queue.length > 0) {
+      const task = queue.shift();
+      if (!task) break;
+      await task();
+    }
+  });
+  await Promise.all(workers);
 }

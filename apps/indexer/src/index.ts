@@ -1,15 +1,6 @@
 import pino from "pino";
 import { JsonRpcProvider } from "ethers";
-import {
-  Hex,
-  Log,
-  Transaction,
-  createPublicClient,
-  decodeEventLog,
-  decodeFunctionData,
-  getAddress,
-  http
-} from "viem";
+import { Hex, createPublicClient, decodeEventLog, getAddress, http } from "viem";
 import { base } from "viem/chains";
 import {
   db,
@@ -23,10 +14,9 @@ import {
   setLastProcessedBlock
 } from "./db.js";
 import { env } from "./env.js";
-import { computeMarketId } from "./helpers.js";
 import { blockForDaysAgo } from "./findStartBlock.js";
 import { resolveAndStoreProfiles } from "./contextProfiles.js";
-import { predictionMarketAbi, vaultAbi, rewardDistributorAbi, erc20Abi } from "./abi.js";
+import { predictionMarketAbi, vaultAbi, rewardDistributorAbi } from "./abi.js";
 
 const logger = (pino as any)({ level: process.env.LOG_LEVEL ?? "info" });
 
@@ -40,9 +30,17 @@ const provider = new JsonRpcProvider(env.baseRpc);
 const USDC_DECIMALS = 6n;
 const PROB_SCALE = Number(10n ** USDC_DECIMALS);
 const IMPACT_USDC_CLIPS: bigint[] = [25n, 50n, 100n, 250n].map((v) => v * 10n ** USDC_DECIMALS);
+const LOG_BATCH_SIZE = BigInt(process.env.LOG_BATCH_SIZE ?? "500");
+const PRICE_BATCH_SIZE = Math.max(1, Number(process.env.PRICE_BATCH_SIZE ?? 20));
+const META_UPDATE_INTERVAL = BigInt(process.env.META_UPDATE_INTERVAL ?? "50");
 
 const pendingProfiles = new Set<string>();
+const blockTimestampCache = new Map<bigint, number>();
+const BLOCK_CACHE_LIMIT = 2048;
 
+const knownMarketsRows = db.prepare("SELECT marketId FROM markets").all() as { marketId: string }[];
+const knownMarkets = new Set<string>(knownMarketsRows.map((row) => row.marketId));
+let priceCursor = 0;
 
 function enqueueProfile(address: string | undefined) {
   if (!address) return;
@@ -61,288 +59,279 @@ async function flushProfiles() {
     logger.warn({ err: error }, "profile enrichment failed");
   }
 }
-const knownMarketsRows = db.prepare("SELECT marketId FROM markets").all() as { marketId: string }[];
-const knownMarkets = new Set<string>(knownMarketsRows.map((row) => row.marketId));
 
-async function processBlock(blockNumber: bigint) {
-  const block = await client.getBlock({ blockNumber, includeTransactions: true }) as any;
-  const blockTs = Number(block.timestamp);
-
-  for (const tx of block.transactions) {
-    if (!tx.to) continue;
-    if (tx.to.toLowerCase() !== env.predictionMarket) continue;
-    await handlePredictionMarketTx(tx, blockTs);
+async function getBlockTimestamp(blockNumber: bigint): Promise<number> {
+  if (blockTimestampCache.has(blockNumber)) {
+    return blockTimestampCache.get(blockNumber)!;
   }
-
-  await processVaultLogs(blockNumber, blockTs);
-  await processRewardLogs(blockNumber, blockTs);
-  await flushProfiles();
-
-  setLastProcessedBlock("last_block_synced", blockNumber);
+  const block = await client.getBlock({ blockNumber });
+  const ts = Number(block.timestamp);
+  blockTimestampCache.set(blockNumber, ts);
+  if (blockTimestampCache.size > BLOCK_CACHE_LIMIT) {
+    blockTimestampCache.clear();
+  }
+  return ts;
 }
 
-async function handlePredictionMarketTx(tx: any, blockTs: number) {
-  let decoded: any;
-  try {
-    decoded = decodeFunctionData({ abi: predictionMarketAbi, data: tx.input }) as any;
-  } catch (error) {
-    return;
-  }
-
-  const fnName: string = decoded?.functionName ?? "";
-  const args: any[] = decoded?.args ?? [];
-
-  if (fnName === "createMarket") {
-    await handleCreateMarket(tx, args, blockTs);
-  } else if (fnName === "trade") {
-    await handleTrade(tx, args, blockTs);
-  }
-}
-
-async function handleCreateMarket(tx: any, args: unknown[], blockTs: number) {
-  const [rawParams] = args as [
-    {
-      oracle?: Hex;
-      questionId?: Hex;
-      surplusRecipient?: Hex;
-      metadata?: Hex;
-      outcomeNames?: string[];
-    }
-  ];
-  const params = rawParams ?? ({} as any);
-
-  const creator = getAddress(tx.from);
-  const oracle = params.oracle ? getAddress(params.oracle) : creator;
-  const surplusRecipient = params.surplusRecipient ? getAddress(params.surplusRecipient) : creator;
-  const questionId = (params.questionId ?? "0x" + "0".repeat(64)) as Hex;
-  const marketId = computeMarketId(creator, oracle, questionId);
-  const normalizedMarketId = (marketId as string).toLowerCase() as Hex;
-
-  if (knownMarkets.has(normalizedMarketId)) {
-    return;
-  }
-
-  const receipt = await client.getTransactionReceipt({ hash: tx.hash });
-
-  let outcomeNames: string[] = [];
-  let metadata: Hex | null = params.metadata && params.metadata !== "0x" ? params.metadata : null;
-
-  for (const log of receipt.logs) {
-    if (log.address.toLowerCase() !== env.predictionMarket) continue;
+async function processPredictionMarketLogs(logs: any[]) {
+  for (const log of logs) {
+    let decoded: any;
     try {
-      const decodedLog = decodeEventLog({
-        abi: predictionMarketAbi,
-        data: log.data,
-        topics: log.topics
-      }) as any;
-      if (decodedLog?.eventName === "MarketCreated") {
-        const eventArgs = decodedLog.args ?? {} as any;
-        outcomeNames = (eventArgs.outcomeNames as string[]) ?? [];
-        const maybeMetadata = eventArgs.metadata as Hex | undefined;
-        if (!metadata && maybeMetadata && maybeMetadata !== "0x") {
-          metadata = maybeMetadata;
-        }
+      decoded = decodeEventLog({ abi: predictionMarketAbi, data: log.data, topics: log.topics });
+    } catch (error) {
+      logger.warn({ err: error, txHash: log.transactionHash }, "failed to decode prediction market log");
+      continue;
+    }
+
+    const eventArgs = (decoded?.args ?? {}) as any;
+    const blockNumber: bigint = log.blockNumber;
+    const timestamp = await getBlockTimestamp(blockNumber);
+
+    if (decoded?.eventName === "MarketCreated") {
+      const marketIdRaw = eventArgs.marketId as Hex | undefined;
+      const creatorRaw = eventArgs.creator as Hex | undefined;
+      const oracleRaw = eventArgs.oracle as Hex | undefined;
+      const surplusRaw = eventArgs.surplusRecipient as Hex | undefined;
+      if (!marketIdRaw || !creatorRaw || !oracleRaw || !surplusRaw) continue;
+
+      const marketId = (marketIdRaw as string).toLowerCase() as `0x${string}`;
+      const creator = getAddress(creatorRaw as Hex).toLowerCase();
+      const oracle = getAddress(oracleRaw as Hex).toLowerCase();
+      const surplusRecipient = getAddress(surplusRaw as Hex).toLowerCase();
+      const questionId = (eventArgs.questionId ?? "0x" + "0".repeat(64)) as Hex;
+      const metadata = (eventArgs.metadata as Hex | undefined) ?? null;
+      const outcomeNames = Array.isArray(eventArgs.outcomeNames) ? (eventArgs.outcomeNames as string[]) : [];
+
+      insertMarket({
+        marketId,
+        creator: creator as `0x${string}`,
+        oracle: oracle as `0x${string}`,
+        surplusRecipient: surplusRecipient as `0x${string}`,
+        questionId,
+        outcomeNames,
+        metadata,
+        txHash: log.transactionHash,
+        createdAt: timestamp
+      });
+
+      knownMarkets.add(marketId);
+      enqueueProfile(creator);
+      enqueueProfile(oracle);
+      enqueueProfile(surplusRecipient);
+    } else if (decoded?.eventName === "MarketTraded") {
+      const marketIdRaw = eventArgs.marketId as Hex | undefined;
+      const traderRaw = eventArgs.trader as Hex | undefined;
+      if (!marketIdRaw || !traderRaw) continue;
+      const marketId = (marketIdRaw as string).toLowerCase();
+      const costDelta = BigInt(eventArgs.costDelta ?? 0n);
+      const usdcIn = costDelta > 0n ? costDelta : 0n;
+      const usdcOut = costDelta < 0n ? -costDelta : 0n;
+
+      insertTrade({
+        ts: timestamp,
+        marketId,
+        txHash: log.transactionHash,
+        usdcIn,
+        usdcOut
+      });
+
+      enqueueProfile(getAddress(traderRaw as Hex));
+    }
+  }
+}
+
+async function processVaultLogs(logs: any[]) {
+  for (const log of logs) {
+    let decoded: any;
+    try {
+      decoded = decodeEventLog({ abi: vaultAbi, data: log.data, topics: log.topics });
+    } catch (error) {
+      logger.warn({ err: error, txHash: log.transactionHash }, "failed to decode vault log");
+      continue;
+    }
+
+    const eventArgs = (decoded?.args ?? {}) as any;
+    const timestamp = await getBlockTimestamp(log.blockNumber);
+
+    switch (decoded?.eventName) {
+      case "LockUpdated": {
+        const locker = eventArgs.locker ? getAddress(eventArgs.locker as Hex) : undefined;
+        const marketId = typeof eventArgs.marketId === "string" ? (eventArgs.marketId as string).toLowerCase() : "";
+        const amounts = Array.isArray(eventArgs.amounts) ? (eventArgs.amounts as bigint[]).map((v) => v.toString()) : [];
+        if (!locker || !marketId) break;
+        insertLockEvent({
+          ts: timestamp,
+          marketId,
+          user: locker,
+          type: "lock",
+          payload: { amounts }
+        });
+        enqueueProfile(locker);
         break;
       }
-    } catch (error) {
-      continue;
-    }
-  }
-
-  insertMarket({
-    marketId: normalizedMarketId,
-    creator,
-    oracle,
-    surplusRecipient,
-    questionId,
-    outcomeNames,
-    metadata,
-    txHash: tx.hash,
-    createdAt: blockTs
-  });
-
-  enqueueProfile(creator);
-  enqueueProfile(oracle);
-  enqueueProfile(surplusRecipient);
-
-  knownMarkets.add(normalizedMarketId);
-  logger.info({ marketId }, "indexed new market");
-}
-
-async function handleTrade(tx: any, args: unknown[], blockTs: number) {
-  const [tradeDataRaw] = args as [
-    {
-      marketId?: Hex;
-    }
-  ];
-  const tradeData = tradeDataRaw ?? ({} as any);
-
-  const marketId = (tradeData.marketId ?? "0x" + "0".repeat(64)).toLowerCase();
-
-  const receipt = await client.getTransactionReceipt({ hash: tx.hash });
-
-  let usdcIn = 0n;
-  let usdcOut = 0n;
-
-  for (const log of receipt.logs) {
-    if (log.address.toLowerCase() !== env.usdc) continue;
-    try {
-      const decoded = decodeEventLog({ abi: erc20Abi, data: log.data, topics: log.topics }) as any;
-      if (decoded?.eventName !== "Transfer") continue;
-      const eventArgs = (decoded?.args ?? {}) as any;
-      const from = eventArgs.from ? getAddress(eventArgs.from as Hex).toLowerCase() : "";
-      const to = eventArgs.to ? getAddress(eventArgs.to as Hex).toLowerCase() : "";
-      const value = eventArgs.value != null ? BigInt(eventArgs.value) : 0n;
-      if (!from && !to) continue;
-      if (to === env.predictionMarket) {
-        usdcIn += value;
-      } else if (from === env.predictionMarket) {
-        usdcOut += value;
-      }
-    } catch (error) {
-      continue;
-    }
-  }
-
-  insertTrade({
-    ts: blockTs,
-    marketId,
-    txHash: tx.hash,
-    usdcIn,
-    usdcOut
-  });
-
-  enqueueProfile(tx.from);
-}
-
-async function processVaultLogs(blockNumber: bigint, blockTs: number) {
-  const logs = await client.getLogs({
-    address: env.vault as Hex,
-    fromBlock: blockNumber,
-    toBlock: blockNumber
-  });
-
-  for (const log of logs) {
-    try {
-      const decoded = decodeEventLog({ abi: vaultAbi, data: log.data, topics: log.topics }) as any;
-      const eventArgs = (decoded?.args ?? {}) as any;
-      switch (decoded?.eventName) {
-        case "LockUpdated": {
-          const locker = eventArgs.locker ? getAddress(eventArgs.locker as Hex) : undefined;
-          const marketId = typeof eventArgs.marketId === "string" ? eventArgs.marketId.toLowerCase() : "";
-          const amounts = Array.isArray(eventArgs.amounts) ? (eventArgs.amounts as bigint[]).map((v) => v.toString()) : [];
-          if (!locker || !marketId) break;
-          insertLockEvent({
-            ts: blockTs,
-            marketId,
-            user: locker,
-            type: "lock",
-            payload: { amounts }
-          });
-          enqueueProfile(locker);
-          break;
-        }
-        case "StakeUpdated": {
-          const staker = eventArgs.staker ? getAddress(eventArgs.staker as Hex) : undefined;
-          const marketId = typeof eventArgs.marketId === "string" ? eventArgs.marketId.toLowerCase() : "";
-          const amounts = Array.isArray(eventArgs.amounts) ? (eventArgs.amounts as bigint[]).map((v) => v.toString()) : [];
-          if (!staker || !marketId) break;
-          insertLockEvent({
-            ts: blockTs,
-            marketId,
-            user: staker,
-            type: "stake",
-            payload: { amounts }
-          });
-          enqueueProfile(staker);
-          break;
-        }
-        case "Unlocked": {
-          const locker = eventArgs.locker ? getAddress(eventArgs.locker as Hex) : undefined;
-          const marketId = typeof eventArgs.marketId === "string" ? eventArgs.marketId.toLowerCase() : "";
-          const amounts = Array.isArray(eventArgs.amounts) ? (eventArgs.amounts as bigint[]).map((v) => v.toString()) : [];
-          if (!locker || !marketId) break;
-          insertLockEvent({
-            ts: blockTs,
-            marketId,
-            user: locker,
-            type: "unlock",
-            payload: { amounts }
-          });
-          enqueueProfile(locker);
-          break;
-        }
-        case "SponsoredLocked": {
-          const user = eventArgs.user ? getAddress(eventArgs.user as Hex) : undefined;
-          const marketId = typeof eventArgs.marketId === "string" ? eventArgs.marketId.toLowerCase() : "";
-          if (!user || !marketId) break;
-          insertLockEvent({
-            ts: blockTs,
-            marketId,
-            user,
-            type: "sponsored",
-            payload: {
-              setsAmount: eventArgs.setsAmount ? String(eventArgs.setsAmount) : null,
-              userPaid: eventArgs.userPaid ? String(eventArgs.userPaid) : null,
-              subsidyUsed: eventArgs.subsidyUsed ? String(eventArgs.subsidyUsed) : null,
-              actualCost: eventArgs.actualCost ? String(eventArgs.actualCost) : null,
-              outcomes: typeof eventArgs.outcomes === "number" ? eventArgs.outcomes : Number(eventArgs.outcomes ?? 0),
-              nonce: eventArgs.nonce ? String(eventArgs.nonce) : null
-            }
-          });
-          enqueueProfile(user);
-          break;
-        }
-        default:
-          break;
-      }
-    } catch (error) {
-      logger.warn({ err: error }, "failed to decode vault log");
-    }
-  }
-}
-
-async function processRewardLogs(blockNumber: bigint, blockTs: number) {
-  const logs = await client.getLogs({
-    address: env.rewardDistributor as Hex,
-    fromBlock: blockNumber,
-    toBlock: blockNumber
-  });
-
-  for (const log of logs) {
-    try {
-      const decoded = decodeEventLog({ abi: rewardDistributorAbi, data: log.data, topics: log.topics }) as any;
-      const eventArgs = (decoded?.args ?? {}) as any;
-      if (decoded?.eventName === "EpochRootSet") {
-        insertRewardEvent({
-          ts: blockTs,
-          kind: "root",
-          epochId: eventArgs.epochId ? String(eventArgs.epochId) : "0",
-          root: eventArgs.merkleRoot ?? null
+      case "StakeUpdated": {
+        const staker = eventArgs.staker ? getAddress(eventArgs.staker as Hex) : undefined;
+        const marketId = typeof eventArgs.marketId === "string" ? (eventArgs.marketId as string).toLowerCase() : "";
+        const amounts = Array.isArray(eventArgs.amounts) ? (eventArgs.amounts as bigint[]).map((v) => v.toString()) : [];
+        if (!staker || !marketId) break;
+        insertLockEvent({
+          ts: timestamp,
+          marketId,
+          user: staker,
+          type: "stake",
+          payload: { amounts }
         });
-      } else if (decoded?.eventName === "RewardClaimed") {
+        enqueueProfile(staker);
+        break;
+      }
+      case "Unlocked": {
+        const locker = eventArgs.locker ? getAddress(eventArgs.locker as Hex) : undefined;
+        const marketId = typeof eventArgs.marketId === "string" ? (eventArgs.marketId as string).toLowerCase() : "";
+        const amounts = Array.isArray(eventArgs.amounts) ? (eventArgs.amounts as bigint[]).map((v) => v.toString()) : [];
+        if (!locker || !marketId) break;
+        insertLockEvent({
+          ts: timestamp,
+          marketId,
+          user: locker,
+          type: "unlock",
+          payload: { amounts }
+        });
+        enqueueProfile(locker);
+        break;
+      }
+      case "SponsoredLocked": {
         const user = eventArgs.user ? getAddress(eventArgs.user as Hex) : undefined;
-        insertRewardEvent({
-          ts: blockTs,
-          kind: "claim",
-          epochId: eventArgs.epochId ? String(eventArgs.epochId) : "0",
-          user: user ?? null,
-          amount: eventArgs.amount != null ? BigInt(eventArgs.amount) : null
+        const marketId = typeof eventArgs.marketId === "string" ? (eventArgs.marketId as string).toLowerCase() : "";
+        if (!user || !marketId) break;
+        insertLockEvent({
+          ts: timestamp,
+          marketId,
+          user,
+          type: "sponsored",
+          payload: {
+            setsAmount: eventArgs.setsAmount ? String(eventArgs.setsAmount) : null,
+            userPaid: eventArgs.userPaid ? String(eventArgs.userPaid) : null,
+            subsidyUsed: eventArgs.subsidyUsed ? String(eventArgs.subsidyUsed) : null,
+            actualCost: eventArgs.actualCost ? String(eventArgs.actualCost) : null,
+            outcomes: typeof eventArgs.outcomes === "number" ? eventArgs.outcomes : Number(eventArgs.outcomes ?? 0),
+            nonce: eventArgs.nonce ? String(eventArgs.nonce) : null
+          }
         });
-        if (user) enqueueProfile(user);
+        enqueueProfile(user);
+        break;
       }
+      default:
+        break;
+    }
+  }
+}
+
+async function processRewardLogs(logs: any[]) {
+  for (const log of logs) {
+    let decoded: any;
+    try {
+      decoded = decodeEventLog({ abi: rewardDistributorAbi, data: log.data, topics: log.topics });
     } catch (error) {
-      logger.warn({ err: error }, "failed to decode reward log");
+      logger.warn({ err: error, txHash: log.transactionHash }, "failed to decode reward log");
+      continue;
+    }
+
+    const eventArgs = (decoded?.args ?? {}) as any;
+    const timestamp = await getBlockTimestamp(log.blockNumber);
+
+    if (decoded?.eventName === "EpochRootSet") {
+      insertRewardEvent({
+        ts: timestamp,
+        kind: "root",
+        epochId: eventArgs.epochId ? String(eventArgs.epochId) : "0",
+        root: eventArgs.merkleRoot ?? null
+      });
+    } else if (decoded?.eventName === "RewardClaimed") {
+      const user = eventArgs.user ? (eventArgs.user as string) : undefined;
+      insertRewardEvent({
+        ts: timestamp,
+        kind: "claim",
+        epochId: eventArgs.epochId ? String(eventArgs.epochId) : "0",
+        user: user ?? null,
+        amount: eventArgs.amount != null ? BigInt(eventArgs.amount) : null
+      });
+      if (user) enqueueProfile(user);
+    }
+  }
+}
+
+async function processRange(fromBlock: bigint, toBlock: bigint) {
+  const pmLogs = await client.getLogs({
+    address: env.predictionMarket as Hex,
+    fromBlock,
+    toBlock
+  });
+  const vaultLogs = await client.getLogs({
+    address: env.vault as Hex,
+    fromBlock,
+    toBlock
+  });
+  const rewardLogs = await client.getLogs({
+    address: env.rewardDistributor as Hex,
+    fromBlock,
+    toBlock
+  });
+
+  await processPredictionMarketLogs(pmLogs);
+  await processVaultLogs(vaultLogs);
+  await processRewardLogs(rewardLogs);
+  await flushProfiles();
+
+  logger.debug({ from: fromBlock.toString(), to: toBlock.toString() }, "processed block range");
+}
+
+async function syncLoop() {
+  const boundary = BigInt(await blockForDaysAgo(provider, env.lookbackDays));
+  let lastPersisted = getLastProcessedBlock("last_block_synced");
+  let cursor = lastPersisted ?? boundary - 1n;
+  if (cursor < boundary - 1n) {
+    cursor = boundary - 1n;
+  }
+  let lastMetaWrite = lastPersisted ?? cursor;
+
+  logger.info({ from: (cursor + 1n).toString(), lookbackDays: env.lookbackDays }, "starting historical sync");
+
+  while (true) {
+    const head = await client.getBlockNumber();
+    if (cursor < head) {
+      const fromBlock = cursor + 1n;
+      const plannedUpper = fromBlock + LOG_BATCH_SIZE - 1n;
+      const toBlock = plannedUpper > head ? head : plannedUpper;
+
+      await processRange(fromBlock, toBlock);
+      cursor = toBlock;
+
+      if (cursor - lastMetaWrite >= META_UPDATE_INTERVAL || cursor === head) {
+        setLastProcessedBlock("last_block_synced", cursor);
+        lastMetaWrite = cursor;
+      }
+    } else {
+      await wait(5_000);
     }
   }
 }
 
 async function refreshPricesAndImpact() {
-  if (knownMarkets.size === 0) return;
+  const markets = Array.from(knownMarkets);
+  if (markets.length === 0) return;
+  if (priceCursor >= markets.length) {
+    priceCursor = 0;
+  }
+  const batchCount = Math.min(PRICE_BATCH_SIZE, markets.length);
+  const selected: string[] = [];
+  for (let i = 0; i < batchCount; i++) {
+    const index = (priceCursor + i) % markets.length;
+    selected.push(markets[index]);
+  }
+  priceCursor = (priceCursor + batchCount) % markets.length;
 
   const now = Math.floor(Date.now() / 1000);
-
-  for (const marketId of knownMarkets) {
+  for (const marketId of selected) {
     try {
       const prices = (await client.readContract({
         address: env.predictionMarket as Hex,
@@ -353,14 +342,14 @@ async function refreshPricesAndImpact() {
 
       insertPrice({ ts: now, marketId, prices });
 
-      await recomputeImpact(marketId as Hex, prices, now);
+      await recomputeImpact(marketId as `0x${string}`, prices, now);
     } catch (error) {
       logger.warn({ err: error, marketId }, "failed to refresh prices");
     }
   }
 }
 
-async function recomputeImpact(marketId: Hex, basePrices: bigint[], ts: number) {
+async function recomputeImpact(marketId: `0x${string}`, basePrices: bigint[], ts: number) {
   try {
     const info = (await client.readContract({
       address: env.predictionMarket as Hex,
@@ -372,7 +361,7 @@ async function recomputeImpact(marketId: Hex, basePrices: bigint[], ts: number) 
       outcomeQs: bigint[];
     };
 
-    if (info.outcomeQs.length === 0) return;
+    if (!info || info.outcomeQs.length === 0) return;
 
     let topIndex = 0;
     for (let i = 1; i < basePrices.length; i++) {
@@ -387,7 +376,6 @@ async function recomputeImpact(marketId: Hex, basePrices: bigint[], ts: number) 
       const shares = await findSharesForCost(info.outcomeQs, info.alpha, topIndex, clip);
       if (!shares) continue;
 
-      const deltaShares = info.outcomeQs.map((_, idx) => (idx === topIndex ? shares : 0n));
       const newQs = info.outcomeQs.map((q, idx) => (idx === topIndex ? q + shares : q));
 
       const newPrices = (await client.readContract({
@@ -449,56 +437,6 @@ async function findSharesForCost(qs: bigint[], alpha: bigint, index: number, tar
   }
 
   return high;
-}
-
-async function syncLoop() {
-  const startBoundary = BigInt(await blockForDaysAgo(provider, env.lookbackDays));
-  const minCursor = startBoundary > 0n ? startBoundary - 1n : -1n;
-
-  let nextBlock = getLastProcessedBlock("last_block_synced");
-  if (typeof nextBlock === "bigint") {
-    if (nextBlock < minCursor) {
-      nextBlock = minCursor;
-    }
-  } else {
-    nextBlock = minCursor;
-  }
-
-  const latest = await client.getBlockNumber();
-  logger.info(
-    { from: (nextBlock + 1n).toString(), to: latest.toString(), lookbackDays: env.lookbackDays },
-    "starting historical sync"
-  );
-
-  while (nextBlock < latest) {
-    nextBlock += 1n;
-    try {
-      await processBlock(nextBlock);
-    } catch (error) {
-      logger.error({ err: error, block: nextBlock.toString() }, "failed processing block");
-      throw error;
-    }
-  }
-
-  logger.info("historical sync complete");
-
-  let cursor = nextBlock;
-
-  while (true) {
-    const head = await client.getBlockNumber();
-    while (cursor < head) {
-      cursor += 1n;
-      try {
-        await processBlock(cursor);
-      } catch (error) {
-        logger.error({ err: error, block: cursor.toString() }, "sync error");
-        cursor -= 1n;
-        await wait(5_000);
-        break;
-      }
-    }
-    await wait(5_000);
-  }
 }
 
 async function pricesLoop() {
