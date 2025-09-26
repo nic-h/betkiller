@@ -55,3 +55,10 @@ The indexer writes to `data/context-edge.db`. The web app reads from the same pa
 - `scripts/copy-abis.js` keeps ABIs in sync with `contracts/out`
 - `apps/indexer` contains the viem-based indexer (poller + log processing)
 - `apps/web` is a Tailwind-styled single-page dashboard (App Router)
+
+## Specs & Features
+
+Detailed app documentation lives under [`docs/`](./docs):
+
+- [`app-spec.md`](./docs/app-spec.md) – human-readable rundown of the indexer, dashboard surfaces, APIs, schema, and runbook.
+- [`app-spec.llm.md`](./docs/app-spec.llm.md) – LLM-friendly YAML summary you can drop into new chats.
