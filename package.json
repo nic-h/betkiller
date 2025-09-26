@@ -1,0 +1,13 @@
+{
+  "name": "context-edge",
+  "private": true,
+  "version": "0.0.1",
+  "scripts": {
+    "copy-abis": "node scripts/copy-abis.js"
+  },
+  "workspaces": [
+    "contracts",
+    "apps/*",
+    "scripts"
+  ]
+}

@@ -1,0 +1,12 @@
+node_modules/
+.pnpm-store/
+.pnp.*
+dist/
+.out/
+.DS_Store
+apps/indexer/dist/
+apps/web/.next/
+apps/web/out/
+data/
+.env
+*.log
