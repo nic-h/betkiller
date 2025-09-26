@@ -1,19 +1,25 @@
-import type { Config } from "tailwindcss";
+import type { Config } from 'tailwindcss';
 
-const config: Config = {
-  content: ["./app/**/*.{ts,tsx}", "./components/**/*.{ts,tsx}", "./lib/**/*.{ts,tsx}"],
+export default {
+  content: ['./app/**/*.{ts,tsx}', './components/**/*.{ts,tsx}'],
   theme: {
     extend: {
-      fontFamily: {
-        mono: ['"Fira Code"', "monospace"]
-      },
       colors: {
-        surface: "#f5f5f5",
-        ink: "#111111"
-      }
-    }
+        brand: {
+          bg: '#0B0B0C',
+          panel: '#111214',
+          text: '#E6E7E9',
+          muted: '#9AA0A6',
+          ring: '#272B33',
+          blue: '#2B7FFF',
+          orange: '#FF7A00',
+        },
+      },
+      fontFamily: {
+        mono: ['Menlo', 'Fira Code', 'ui-monospace', 'SFMono-Regular', 'monospace'],
+      },
+    },
   },
-  plugins: []
-};
-
-export default config;
+  prefix: 'bk-',
+  darkMode: 'class',
+} satisfies Config;

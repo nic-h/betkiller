@@ -1,0 +1,24 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --bk-bg: #0B0B0C;
+  --bk-panel: #111214;
+  --bk-text: #E6E7E9;
+  --bk-muted: #9AA0A6;
+  --bk-ring: #272B33;
+  --bk-blue: #2B7FFF;
+  --bk-orange: #FF7A00;
+}
+
+#bk-root,
+#bk-root * {
+  box-sizing: border-box;
+}
+
+#bk-root {
+  background: var(--bk-bg);
+  color: var(--bk-text);
+  font-family: Menlo, Fira Code, ui-monospace, SFMono-Regular, monospace;
+}

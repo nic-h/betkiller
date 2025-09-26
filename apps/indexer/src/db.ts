@@ -45,6 +45,7 @@ CREATE TABLE IF NOT EXISTS trades (
   ts INTEGER NOT NULL,
   marketId TEXT NOT NULL,
   txHash TEXT NOT NULL,
+  trader TEXT,
   usdcIn TEXT NOT NULL,
   usdcOut TEXT NOT NULL,
   FOREIGN KEY (marketId) REFERENCES markets(marketId)
@@ -94,9 +95,18 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_trades_tx ON trades(txHash);
 CREATE INDEX IF NOT EXISTS idx_prices_market_ts ON prices(marketId, ts);
 CREATE INDEX IF NOT EXISTS idx_impact_market ON impact(marketId);
 CREATE INDEX IF NOT EXISTS idx_locks_ts ON locks(ts);
+CREATE INDEX IF NOT EXISTS idx_locks_user_ts ON locks(user, ts);
 CREATE INDEX IF NOT EXISTS idx_rewards_ts ON rewards(ts);
+CREATE INDEX IF NOT EXISTS idx_rewards_user_ts ON rewards(user, ts);
+CREATE INDEX IF NOT EXISTS idx_trades_market_ts ON trades(marketId, ts);
+CREATE INDEX IF NOT EXISTS idx_trades_trader_ts ON trades(trader, ts);
 CREATE INDEX IF NOT EXISTS idx_markets_createdAt ON markets(createdAt);
 `);
+
+const tradeColumns = db.prepare('PRAGMA table_info(trades)').all() as { name: string }[];
+if (!tradeColumns.some((c) => c.name === 'trader')) {
+  db.exec('ALTER TABLE trades ADD COLUMN trader TEXT');
+}
 
 type MetaKey = "last_block_synced";
 
@@ -157,14 +167,15 @@ export function insertPrice(row: { ts: number; marketId: string; prices: bigint[
   });
 }
 
-export function insertTrade(row: { ts: number; marketId: string; txHash: string; usdcIn: bigint; usdcOut: bigint }) {
+export function insertTrade(row: { ts: number; marketId: string; txHash: string; trader: string; usdcIn: bigint; usdcOut: bigint }) {
   db.prepare(
-    `INSERT INTO trades(ts, marketId, txHash, usdcIn, usdcOut)
-     VALUES (@ts, @marketId, @txHash, @usdcIn, @usdcOut)`
+    `INSERT INTO trades(ts, marketId, txHash, trader, usdcIn, usdcOut)
+     VALUES (@ts, @marketId, @txHash, @trader, @usdcIn, @usdcOut)`
   ).run({
     ts: row.ts,
     marketId: row.marketId,
     txHash: row.txHash,
+    trader: row.trader,
     usdcIn: row.usdcIn.toString(),
     usdcOut: row.usdcOut.toString()
   });

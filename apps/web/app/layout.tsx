@@ -1,12 +1,5 @@
 import type { Metadata } from "next";
-import { Fira_Code } from "next/font/google";
-import "./globals.css";
-
-const firaCode = Fira_Code({
-  subsets: ["latin"],
-  weight: ["400", "500", "600", "700"],
-  display: "swap"
-});
+import "../styles/globals.css";
 
 export const metadata: Metadata = {
   title: "Context Edge",
@@ -17,9 +10,11 @@ export default function RootLayout({
   children
 }: Readonly<{ children: React.ReactNode }>) {
   return (
-    <html lang="en" className={`${firaCode.className} bg-surface text-ink`}>
-      <body className="bg-surface text-ink">
-        {children}
+    <html lang="en">
+      <body>
+        <div id="bk-root" className="bk-min-h-screen">
+          {children}
+        </div>
       </body>
     </html>
   );

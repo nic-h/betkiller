@@ -31,6 +31,12 @@ Environment files are pre-populated for Base mainnet deployments:
 Key indexer settings live in `apps/indexer/.env`:
 - `LOOKBACK_DAYS` to control the historical window (defaults to 14)
 - `CONTEXT_BASE` and `PROFILE_SCRAPE` enable automatic profile enrichment
+- `PROFILE_TTL_SECONDS` / `PROFILE_CONCURRENCY` tune Context profile fetch cadence
+
+For the dashboard (`apps/web/.env.local`):
+- `BK_DB` points to the SQLite database (e.g. `../indexer/data/context-edge.db`)
+- `BK_ME` is your wallet for the personal panels
+- `NEXT_PUBLIC_BASE_URL` defaults to `http://localhost:3000` for local preview
 
 ## Running the stack
 

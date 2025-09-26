@@ -123,6 +123,7 @@ async function processPredictionMarketLogs(logs: any[]) {
       const traderRaw = eventArgs.trader as Hex | undefined;
       if (!marketIdRaw || !traderRaw) continue;
       const marketId = (marketIdRaw as string).toLowerCase();
+      const trader = getAddress(traderRaw as Hex).toLowerCase();
       const costDelta = BigInt(eventArgs.costDelta ?? 0n);
       const usdcIn = costDelta > 0n ? costDelta : 0n;
       const usdcOut = costDelta < 0n ? -costDelta : 0n;
@@ -131,11 +132,12 @@ async function processPredictionMarketLogs(logs: any[]) {
         ts: timestamp,
         marketId,
         txHash: log.transactionHash,
+        trader,
         usdcIn,
         usdcOut
       });
 
-      enqueueProfile(getAddress(traderRaw as Hex));
+      enqueueProfile(trader);
     }
   }
 }
