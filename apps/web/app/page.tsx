@@ -5,6 +5,7 @@ import { NearResolutionList } from "@/components/NearResolution";
 import { SplitBar } from "@/components/SplitBar";
 import { CompetitorWatch } from "@/components/CompetitorWatch";
 import { EventLog } from "@/components/EventLog";
+import { PnLTable } from "@/components/PnLTable";
 import {
   getCompetitorWatch,
   getEventLog,
@@ -14,7 +15,8 @@ import {
   getLiveSlate,
   getMeAddress,
   getMySummary,
-  getNearResolution
+  getNearResolution,
+  getPnl
 } from "@/lib/db";
 import { formatMoney } from "@/lib/fmt";
 
@@ -22,12 +24,13 @@ export default async function Page({ searchParams }: { searchParams: { range?: s
   const initialRange = (searchParams.range as any) ?? "14d";
   const initialBucket = (searchParams.by as any) ?? "total";
 
-  const [kpis, leaderboard, liveSlate, nearResolution, mySummary, competitors, events, errors] = await Promise.all([
+  const [kpis, leaderboard, liveSlate, nearResolution, mySummary, pnlRows, competitors, events, errors] = await Promise.all([
     getKpis(),
     Promise.resolve(getLeaderboard(initialRange as any, initialBucket as any)),
     Promise.resolve(getLiveSlate()),
     Promise.resolve(getNearResolution()),
     Promise.resolve(getMySummary("14d")),
+    Promise.resolve(getPnl("14d")),
     Promise.resolve(getCompetitorWatch()),
     Promise.resolve(getEventLog()),
     Promise.resolve(getErrorLog())
@@ -67,13 +70,14 @@ export default async function Page({ searchParams }: { searchParams: { range?: s
               {actionSlate.map((item) => (
                 <div key={item.marketId} className="bk-flex bk-justify-between">
                   <span className="bk-text-brand-blue">{item.title}</span>
-                  <span className="bk-text-brand-muted">Boost {formatMoney(item.boostTotal)} • Edge {item.edgeScore.toFixed(1)}</span>
+                  <span className="bk-text-brand-muted">TVL {formatMoney(item.tvl)} • Edge {item.edgeScore.toFixed(1)}</span>
                 </div>
               ))}
               {actionSlate.length === 0 && <p className="bk-text-brand-muted">No immediate calls to action.</p>}
             </div>
           </div>
           <Leaderboard initialRows={leaderboard} initialRange={initialRange as any} initialBucket={initialBucket as any} />
+          <PnLTable initialRows={pnlRows} initialRange="14d" />
         </div>
         <div className="bk-space-y-6">
           <section className="bk-rounded-2xl bk-bg-brand-panel bk-ring-1 bk-ring-brand-ring bk-p-4 bk-space-y-3">

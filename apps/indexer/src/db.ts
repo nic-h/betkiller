@@ -45,7 +45,6 @@ CREATE TABLE IF NOT EXISTS trades (
   ts INTEGER NOT NULL,
   marketId TEXT NOT NULL,
   txHash TEXT NOT NULL,
-  trader TEXT,
   usdcIn TEXT NOT NULL,
   usdcOut TEXT NOT NULL,
   FOREIGN KEY (marketId) REFERENCES markets(marketId)
@@ -91,6 +90,22 @@ CREATE TABLE IF NOT EXISTS profiles (
   last_seen INTEGER
 );
 
+CREATE TABLE IF NOT EXISTS market_state (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  marketId TEXT NOT NULL,
+  ts INTEGER NOT NULL,
+  totalUsdc TEXT NOT NULL,
+  totalQ TEXT NOT NULL,
+  alpha TEXT NOT NULL
+);
+`);
+
+const tradeColumns = db.prepare('PRAGMA table_info(trades)').all() as { name: string }[];
+if (!tradeColumns.some((c) => c.name === 'trader')) {
+  db.exec('ALTER TABLE trades ADD COLUMN trader TEXT');
+}
+
+db.exec(`
 CREATE UNIQUE INDEX IF NOT EXISTS idx_trades_tx ON trades(txHash);
 CREATE INDEX IF NOT EXISTS idx_prices_market_ts ON prices(marketId, ts);
 CREATE INDEX IF NOT EXISTS idx_impact_market ON impact(marketId);
@@ -101,12 +116,8 @@ CREATE INDEX IF NOT EXISTS idx_rewards_user_ts ON rewards(user, ts);
 CREATE INDEX IF NOT EXISTS idx_trades_market_ts ON trades(marketId, ts);
 CREATE INDEX IF NOT EXISTS idx_trades_trader_ts ON trades(trader, ts);
 CREATE INDEX IF NOT EXISTS idx_markets_createdAt ON markets(createdAt);
+CREATE INDEX IF NOT EXISTS idx_market_state_market_ts ON market_state(marketId, ts);
 `);
-
-const tradeColumns = db.prepare('PRAGMA table_info(trades)').all() as { name: string }[];
-if (!tradeColumns.some((c) => c.name === 'trader')) {
-  db.exec('ALTER TABLE trades ADD COLUMN trader TEXT');
-}
 
 type MetaKey = "last_block_synced";
 
@@ -256,4 +267,19 @@ export function getProfile(address: string): { displayName: string | null; xHand
 
 export function touchProfile(address: string, timestamp: number) {
   touchProfileStmt.run(timestamp, address);
+}
+
+const insertMarketStateStmt = db.prepare(
+  `INSERT INTO market_state(marketId, ts, totalUsdc, totalQ, alpha)
+   VALUES (@marketId, @ts, @totalUsdc, @totalQ, @alpha)`
+);
+
+export function insertMarketState(row: { marketId: string; ts: number; totalUsdc: bigint; totalQ: bigint; alpha: bigint }) {
+  insertMarketStateStmt.run({
+    marketId: row.marketId,
+    ts: row.ts,
+    totalUsdc: row.totalUsdc.toString(),
+    totalQ: row.totalQ.toString(),
+    alpha: row.alpha.toString()
+  });
 }

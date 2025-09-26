@@ -7,6 +7,7 @@ import {
   getLastProcessedBlock,
   insertLockEvent,
   insertMarket,
+  insertMarketState,
   insertPrice,
   insertRewardEvent,
   insertTrade,
@@ -33,10 +34,13 @@ const IMPACT_USDC_CLIPS: bigint[] = [25n, 50n, 100n, 250n].map((v) => v * 10n **
 const LOG_BATCH_SIZE = BigInt(process.env.LOG_BATCH_SIZE ?? "500");
 const PRICE_BATCH_SIZE = Math.max(1, Number(process.env.PRICE_BATCH_SIZE ?? 20));
 const META_UPDATE_INTERVAL = BigInt(process.env.META_UPDATE_INTERVAL ?? "50");
+const MAX_RPC_ATTEMPTS = Number(process.env.RPC_MAX_ATTEMPTS ?? 6);
+const RPC_RETRY_DELAY_MS = Number(process.env.RPC_RETRY_DELAY_MS ?? 1_500);
 
 const pendingProfiles = new Set<string>();
 const blockTimestampCache = new Map<bigint, number>();
 const BLOCK_CACHE_LIMIT = 2048;
+const marketsNeedingState = new Set<string>();
 
 const knownMarketsRows = db.prepare("SELECT marketId FROM markets").all() as { marketId: string }[];
 const knownMarkets = new Set<string>(knownMarketsRows.map((row) => row.marketId));
@@ -64,7 +68,7 @@ async function getBlockTimestamp(blockNumber: bigint): Promise<number> {
   if (blockTimestampCache.has(blockNumber)) {
     return blockTimestampCache.get(blockNumber)!;
   }
-  const block = await client.getBlock({ blockNumber });
+  const block = await callWithRetry(() => client.getBlock({ blockNumber }), `getBlock ${blockNumber.toString()}`);
   const ts = Number(block.timestamp);
   blockTimestampCache.set(blockNumber, ts);
   if (blockTimestampCache.size > BLOCK_CACHE_LIMIT) {
@@ -118,6 +122,7 @@ async function processPredictionMarketLogs(logs: any[]) {
       enqueueProfile(creator);
       enqueueProfile(oracle);
       enqueueProfile(surplusRecipient);
+      marketsNeedingState.add(marketId);
     } else if (decoded?.eventName === "MarketTraded") {
       const marketIdRaw = eventArgs.marketId as Hex | undefined;
       const traderRaw = eventArgs.trader as Hex | undefined;
@@ -138,6 +143,7 @@ async function processPredictionMarketLogs(logs: any[]) {
       });
 
       enqueueProfile(trader);
+      marketsNeedingState.add(marketId);
     }
   }
 }
@@ -263,25 +269,29 @@ async function processRewardLogs(logs: any[]) {
 }
 
 async function processRange(fromBlock: bigint, toBlock: bigint) {
-  const pmLogs = await client.getLogs({
+  const pmLogs = await callWithRetry(() => client.getLogs({
     address: env.predictionMarket as Hex,
     fromBlock,
     toBlock
-  });
-  const vaultLogs = await client.getLogs({
+  }), "getLogs predictionMarket");
+  const vaultLogs = await callWithRetry(() => client.getLogs({
     address: env.vault as Hex,
     fromBlock,
     toBlock
-  });
-  const rewardLogs = await client.getLogs({
+  }), "getLogs vault");
+  const rewardLogs = await callWithRetry(() => client.getLogs({
     address: env.rewardDistributor as Hex,
     fromBlock,
     toBlock
-  });
+  }), "getLogs rewardDistributor");
 
   await processPredictionMarketLogs(pmLogs);
   await processVaultLogs(vaultLogs);
   await processRewardLogs(rewardLogs);
+  if (marketsNeedingState.size > 0) {
+    await recordMarketStates(Array.from(marketsNeedingState), toBlock);
+    marketsNeedingState.clear();
+  }
   await flushProfiles();
 
   logger.debug({ from: fromBlock.toString(), to: toBlock.toString() }, "processed block range");
@@ -299,7 +309,7 @@ async function syncLoop() {
   logger.info({ from: (cursor + 1n).toString(), lookbackDays: env.lookbackDays }, "starting historical sync");
 
   while (true) {
-    const head = await client.getBlockNumber();
+    const head = await callWithRetry(() => client.getBlockNumber(), "getBlockNumber");
     if (cursor < head) {
       const fromBlock = cursor + 1n;
       const plannedUpper = fromBlock + LOG_BATCH_SIZE - 1n;
@@ -335,12 +345,16 @@ async function refreshPricesAndImpact() {
   const now = Math.floor(Date.now() / 1000);
   for (const marketId of selected) {
     try {
-      const prices = (await client.readContract({
-        address: env.predictionMarket as Hex,
-        abi: predictionMarketAbi,
-        functionName: "getPrices",
-        args: [marketId as `0x${string}`]
-      })) as bigint[];
+      const prices = (await callWithRetry(
+        () =>
+          client.readContract({
+            address: env.predictionMarket as Hex,
+            abi: predictionMarketAbi,
+            functionName: "getPrices",
+            args: [marketId as `0x${string}`]
+          }),
+        `getPrices ${marketId}`
+      )) as bigint[];
 
       insertPrice({ ts: now, marketId, prices });
 
@@ -353,12 +367,16 @@ async function refreshPricesAndImpact() {
 
 async function recomputeImpact(marketId: `0x${string}`, basePrices: bigint[], ts: number) {
   try {
-    const info = (await client.readContract({
-      address: env.predictionMarket as Hex,
-      abi: predictionMarketAbi,
-      functionName: "getMarketInfo",
-      args: [marketId]
-    })) as unknown as {
+    const info = (await callWithRetry(
+      () =>
+        client.readContract({
+          address: env.predictionMarket as Hex,
+          abi: predictionMarketAbi,
+          functionName: "getMarketInfo",
+          args: [marketId]
+        }),
+      `getMarketInfo ${marketId}`
+    )) as unknown as {
       alpha: bigint;
       outcomeQs: bigint[];
     };
@@ -380,12 +398,16 @@ async function recomputeImpact(marketId: `0x${string}`, basePrices: bigint[], ts
 
       const newQs = info.outcomeQs.map((q, idx) => (idx === topIndex ? q + shares : q));
 
-      const newPrices = (await client.readContract({
-        address: env.predictionMarket as Hex,
-        abi: predictionMarketAbi,
-        functionName: "calcPrice",
-        args: [newQs, info.alpha]
-      })) as bigint[];
+      const newPrices = (await callWithRetry(
+        () =>
+          client.readContract({
+            address: env.predictionMarket as Hex,
+            abi: predictionMarketAbi,
+            functionName: "calcPrice",
+            args: [newQs, info.alpha]
+          }),
+        `calcPrice ${marketId}`
+      )) as bigint[];
 
       const delta = Number(newPrices[topIndex] - basePrices[topIndex]) / PROB_SCALE;
       impactRows.push({ usdcClip: clip, deltaProb: delta, ts });
@@ -399,17 +421,50 @@ async function recomputeImpact(marketId: `0x${string}`, basePrices: bigint[], ts
   }
 }
 
+async function recordMarketStates(marketIds: string[], referenceBlock: bigint) {
+  const ts = await getBlockTimestamp(referenceBlock);
+  for (const marketId of marketIds) {
+    try {
+      const info = (await callWithRetry(() => client.readContract({
+        address: env.predictionMarket as Hex,
+        abi: predictionMarketAbi,
+        functionName: "getMarketInfo",
+        args: [marketId as `0x${string}`]
+      }), `getMarketInfo ${marketId}`)) as any;
+
+      const alpha = BigInt(info?.alpha ?? info?.[3] ?? 0n);
+      const totalUsdcIn = BigInt(info?.totalUsdcIn ?? info?.[4] ?? 0n);
+      const outcomeQsRaw = (info?.outcomeQs ?? info?.[8] ?? []) as readonly (bigint | string | number)[];
+      const totalQ = outcomeQsRaw.reduce<bigint>((sum, value) => sum + BigInt(value), 0n);
+
+      insertMarketState({
+        marketId,
+        ts,
+        totalUsdc: totalUsdcIn,
+        totalQ,
+        alpha
+      });
+    } catch (error) {
+      logger.warn({ err: error, marketId }, "failed to record market state");
+    }
+  }
+}
+
 async function findSharesForCost(qs: bigint[], alpha: bigint, index: number, targetCost: bigint): Promise<bigint | null> {
   if (targetCost === 0n) return 0n;
 
   const quote = async (shares: bigint) => {
     const deltas = qs.map((_, idx) => (idx === index ? shares : 0n));
-    const cost = (await client.readContract({
-      address: env.predictionMarket as Hex,
-      abi: predictionMarketAbi,
-      functionName: "quoteTrade",
-      args: [qs, alpha, deltas]
-    })) as bigint;
+    const cost = (await callWithRetry(
+      () =>
+        client.readContract({
+          address: env.predictionMarket as Hex,
+          abi: predictionMarketAbi,
+          functionName: "quoteTrade",
+          args: [qs, alpha, deltas]
+        }),
+      "quoteTrade"
+    )) as bigint;
     return cost >= 0n ? cost : -cost;
   };
 
@@ -454,6 +509,18 @@ async function pricesLoop() {
 
 function wait(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function callWithRetry<T>(fn: () => Promise<T>, label: string, attempt = 0): Promise<T> {
+  try {
+    return await fn();
+  } catch (error) {
+    if (attempt >= MAX_RPC_ATTEMPTS) throw error;
+    const delay = RPC_RETRY_DELAY_MS * Math.pow(2, attempt);
+    logger.warn({ err: error, label, attempt }, "rpc retry");
+    await wait(delay);
+    return callWithRetry(fn, label, attempt + 1);
+  }
 }
 
 await Promise.all([syncLoop(), pricesLoop()]);

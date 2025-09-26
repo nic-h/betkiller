@@ -165,6 +165,8 @@ export type SlateItem = {
   volume24h: number;
   uniqueTraders24h: number;
   edgeScore: number;
+  tvl: number;
+  depth: number;
 };
 
 export function getLiveSlate(): SlateItem[] {
@@ -196,6 +198,14 @@ export function getLiveSlate(): SlateItem[] {
     )
     .all() as { marketId: string; payloadJson: string }[];
 
+  const stateRows = db
+    .prepare(
+      `SELECT marketId, totalUsdc, totalQ
+       FROM market_state
+       WHERE id IN (SELECT MAX(id) FROM market_state GROUP BY marketId)`
+    )
+    .all() as { marketId: string; totalUsdc: string; totalQ: string }[];
+
   const volumeMap = new Map<string, { volume: number; traders: number }>();
   for (const row of tradeRows) {
     volumeMap.set(row.marketId, {
@@ -210,6 +220,14 @@ export function getLiveSlate(): SlateItem[] {
     boostMap.set(row.marketId, prev + sumPayloadAmounts(row.payloadJson));
   }
 
+  const tvlMap = new Map<string, { totalUsdc: number; totalQ: number }>();
+  for (const row of stateRows) {
+    tvlMap.set(row.marketId, {
+      totalUsdc: microsToNumber(row.totalUsdc),
+      totalQ: microsToNumber(row.totalQ)
+    });
+  }
+
   return markets
     .map((market) => {
       const title = deriveTitle(market.metadata) ?? market.marketId;
@@ -219,6 +237,7 @@ export function getLiveSlate(): SlateItem[] {
       const uniqueTraders24h = volumeInfo.traders ?? 0;
       const cutoffTs = (market.createdAt ?? now) + 72 * 3600;
       const edgeScore = (boostTotal * 0.4 + volume24h * 0.4 + uniqueTraders24h * 0.2) * ((cutoffTs - now >= 3600 && cutoffTs - now <= 7 * 86400) ? 1 : 0.6);
+      const state = tvlMap.get(market.marketId) ?? { totalUsdc: 0, totalQ: 0 };
       return {
         marketId: market.marketId,
         title,
@@ -226,7 +245,9 @@ export function getLiveSlate(): SlateItem[] {
         boostTotal,
         volume24h,
         uniqueTraders24h,
-        edgeScore
+        edgeScore,
+        tvl: state.totalUsdc,
+        depth: state.totalQ
       };
     })
     .sort((a, b) => b.edgeScore - a.edgeScore)
@@ -426,6 +447,79 @@ export function getErrorLog(): string[] {
 
 export function getMeAddress(): string | null {
   return ME_ADDRESS;
+}
+
+export type PnlRow = {
+  addr: string;
+  name: string;
+  xHandle: string | null;
+  reward: number;
+  netFlow: number;
+  pnl: number;
+};
+
+export function getPnl(range: LeaderboardRange, limit = 50): PnlRow[] {
+  const db = getDatabase();
+  const now = Math.floor(Date.now() / 1000);
+  const cutoff = now - rangeToSeconds(range);
+
+  const rewardRows = db
+    .prepare(
+      `SELECT lower(user) AS addr,
+              SUM(CAST(amount AS INTEGER)) AS reward
+       FROM rewards
+       WHERE user IS NOT NULL AND kind = 'claim' AND ts >= ?
+       GROUP BY addr`
+    )
+    .all(cutoff) as { addr: string; reward: number | null }[];
+
+  const tradeRows = db
+    .prepare(
+      `SELECT lower(trader) AS addr,
+              SUM(CAST(usdcOut AS INTEGER) - CAST(usdcIn AS INTEGER)) AS net
+       FROM trades
+       WHERE trader IS NOT NULL AND ts >= ?
+       GROUP BY addr`
+    )
+    .all(cutoff) as { addr: string; net: number | null }[];
+
+  const profileStmt = db.prepare(
+    `SELECT display_name AS displayName, x_handle AS xHandle
+     FROM profiles
+     WHERE lower(address) = ?`
+  );
+
+  const rewardMap = new Map<string, number>();
+  for (const row of rewardRows) {
+    rewardMap.set(row.addr, microsToNumber(row.reward ?? 0));
+  }
+
+  const tradeMap = new Map<string, number>();
+  for (const row of tradeRows) {
+    tradeMap.set(row.addr, microsToNumber(row.net ?? 0));
+  }
+
+  const addresses = new Set<string>([...rewardMap.keys(), ...tradeMap.keys()]);
+
+  const rows: PnlRow[] = [];
+  for (const addr of addresses) {
+    const profile = profileStmt.get(addr) as { displayName: string | null; xHandle: string | null } | undefined;
+    const reward = rewardMap.get(addr) ?? 0;
+    const netFlow = tradeMap.get(addr) ?? 0;
+    const pnl = reward + netFlow;
+    rows.push({
+      addr,
+      name: profile?.displayName ?? shortenAddress(addr),
+      xHandle: profile?.xHandle ?? null,
+      reward,
+      netFlow,
+      pnl
+    });
+  }
+
+  return rows
+    .sort((a, b) => b.pnl - a.pnl || b.reward - a.reward)
+    .slice(0, limit);
 }
 
 function deriveTitle(metadata?: string | null): string | null {

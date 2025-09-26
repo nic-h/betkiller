@@ -55,7 +55,8 @@ function SlateCard({ item }: { item: SlateEntry }) {
           <div className="bk-text-lg bk-text-brand-blue bk-tabular-nums">{formatNumber(item.edgeScore, 1)}</div>
         </div>
       </div>
-      <div className="bk-flex bk-gap-4 bk-text-xs bk-text-brand-muted">
+      <div className="bk-flex bk-flex-wrap bk-gap-4 bk-text-xs bk-text-brand-muted">
+        <span>TVL {formatMoney(item.tvl)}</span>
         <span>Boost {formatMoney(item.boostTotal)}</span>
         <span>Vol 24h {formatMoney(item.volume24h)}</span>
         <span>Traders {item.uniqueTraders24h}</span>
