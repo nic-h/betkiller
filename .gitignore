@@ -8,5 +8,9 @@ apps/indexer/dist/
 apps/web/.next/
 apps/web/out/
 data/
+!apps/indexer/data/
+apps/indexer/data/*
+!apps/indexer/data/context_logs.jsonl
+!apps/indexer/data/context_profiles.jsonl
 .env
 *.log
