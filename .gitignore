@@ -12,5 +12,6 @@ data/
 apps/indexer/data/*
 !apps/indexer/data/context_logs.jsonl
 !apps/indexer/data/context_profiles.jsonl
+!apps/indexer/data/context_summary.json
 .env
 *.log
