@@ -1,0 +1,2 @@
+* { border-radius: 0 !important; box-shadow: none !important; }
+:root { --radius: 0; --shadow: none; }

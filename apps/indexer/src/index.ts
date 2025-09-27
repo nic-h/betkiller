@@ -1,15 +1,17 @@
 import 'dotenv/config';
 import { JsonRpcProvider, Log } from 'ethers';
 import { env } from './env.js';
-import { db } from './db.js';
+import { db, getIndexerCursor, setIndexerCursor } from './db.js';
 import {
-  handleMarketLog,
-  handleVaultLog,
   handleRewardTransferLog,
-  flushPendingMarketStates,
   flushProfiles,
+  flushPendingMarketStates,
+  queueResnapshotForActiveMarkets,
   TRANSFER_TOPIC
 } from './handlers.js';
+import { appendStoredLogs, serializeLog, type StoredLog } from './logStore.js';
+import { ingestJsonLogs, bootstrapFromExisting } from './jsonlIngester.js';
+import { ensureSeedOnce } from './seed.js';
 
 const RPCS = (process.env.RPC_URLS || process.env.RPC_URL || '')
   .split('|')
@@ -27,17 +29,34 @@ function makeProvider(index: number) {
 let rpcIndex = 0;
 let provider = makeProvider(rpcIndex);
 
-const FINALITY_LAG = Number(process.env.FINALITY_LAG_BLOCKS ?? 12);
-let STEP = Number(process.env.LOG_STEP ?? 1500);
+const CHAIN_ID = Number(process.env.CHAIN_ID ?? '8453');
+
+const CONFIRMATIONS = Number(process.env.CONFIRMATIONS ?? process.env.FINALITY_LAG_BLOCKS ?? 8);
+const STEP = Number(process.env.STEP ?? process.env.CHUNK ?? process.env.LOG_STEP ?? 4000);
 const POLL_MS = Number(process.env.POLL_MS ?? 4000);
+const BACKFILL_DAYS = Number(process.env.BACKFILL_DAYS ?? env.lookbackDays ?? 14);
+const RESNAPSHOT_INTERVAL_MS = Number(process.env.RESNAPSHOT_INTERVAL_MS ?? 24 * 60 * 60 * 1000);
 
 const pmAddress = env.predictionMarket.toLowerCase();
 const vaultAddress = env.vault.toLowerCase();
 const rewardToken = env.rewardToken?.toLowerCase();
 const rewardSources = env.rewardDistributors.map((addr) => addr.toLowerCase());
+if (!rewardSources.includes(env.rewardDistributor.toLowerCase())) {
+  rewardSources.push(env.rewardDistributor.toLowerCase());
+}
+
+let nextResnapshotAt = 0;
 
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function resetResnapshotSchedule() {
+  if (RESNAPSHOT_INTERVAL_MS <= 0) {
+    nextResnapshotAt = Number.POSITIVE_INFINITY;
+  } else {
+    nextResnapshotAt = Date.now() + RESNAPSHOT_INTERVAL_MS;
+  }
 }
 
 function getMeta(key: string): number {
@@ -54,10 +73,16 @@ function setMeta(key: string, value: number | string) {
 }
 
 function getLastBlock(): number {
+  const cursor = getIndexerCursor(CHAIN_ID);
+  if (cursor && Number.isFinite(cursor.lastBlock)) {
+    return cursor.lastBlock;
+  }
   return getMeta('lastBlock');
 }
 
 function setLastBlock(n: number) {
+  const nowSec = Math.floor(Date.now() / 1000);
+  setIndexerCursor(CHAIN_ID, n, nowSec);
   setMeta('lastBlock', n);
   setMeta('lastUpdatedAt', Date.now());
 }
@@ -79,102 +104,119 @@ function looksRangeError(err: any): boolean {
   );
 }
 
-function looksRateLimit(err: any): boolean {
-  const message = String(err?.message ?? err ?? '').toLowerCase();
+function isTransient(err: any): boolean {
+  if (looksRangeError(err)) return true;
   const code = err?.code ?? err?.status ?? err?.error?.code;
-  return message.includes('429') || message.includes('rate') || message.includes('limit') || code === 429;
+  if (code === 'TIMEOUT' || code === -32016) return true;
+  const message = String(err?.message ?? err ?? '').toLowerCase();
+  return /rate limit|timeout|econnreset|etimedout|socket hang up/.test(message);
 }
 
-async function* getLogsSafe(params: {
-  address: string | string[];
-  topics?: (string | null | string[])[];
-  fromBlock: number;
-  toBlock: number;
-}) {
-  let from = params.fromBlock;
-  const toBlock = params.toBlock;
-
-  while (from <= toBlock) {
-    const to = Math.min(from + STEP - 1, toBlock);
+async function getLogsWithBackoff(params: { address: string | string[]; topics?: (string | null | string[])[]; fromBlock: number; toBlock: number }) {
+  let delay = 300;
+  for (let attempt = 0; attempt < 6; attempt++) {
     try {
-      const logs = await provider.getLogs({
+      return await provider.getLogs({
         address: params.address,
         topics: params.topics as any,
-        fromBlock: from,
-        toBlock: to
+        fromBlock: params.fromBlock,
+        toBlock: params.toBlock
       });
-      yield logs;
-      from = to + 1;
-      STEP = Math.min(STEP * 2, Number(process.env.LOG_STEP ?? 1500));
     } catch (err: any) {
-      if (looksRangeError(err) || looksRateLimit(err)) {
-        STEP = Math.max(200, Math.floor(STEP / 2));
-        await sleep(300);
-        continue;
-      }
-      console.warn('provider error, rotating', err?.message ?? err);
-      rpcIndex = (rpcIndex + 1) % RPCS.length;
-      provider = makeProvider(rpcIndex);
-      await sleep(500);
+      if (!isTransient(err)) throw err;
+      await sleep(delay);
+      delay = Math.min(5000, delay * 2);
     }
   }
+  throw new Error(`getLogs backoff exhausted ${params.fromBlock}-${params.toBlock}`);
 }
 
 async function runBatch(fromBlock: number, toBlock: number) {
-  const targetAddresses = [pmAddress, vaultAddress];
+  const contractTargets = Array.from(new Set([pmAddress, vaultAddress, ...rewardSources]));
+  const storedLogs: StoredLog[] = [];
+  const seenKeys = new Set<string>();
 
-  for await (const chunk of getLogsSafe({ address: targetAddresses, fromBlock, toBlock })) {
+  if (contractTargets.length) {
+    const chunk = await getLogsWithBackoff({ address: contractTargets, fromBlock, toBlock });
     for (const raw of chunk as Log[]) {
-      const address = raw.address.toLowerCase();
-      if (address === pmAddress) {
-        await handleMarketLog(provider, raw);
-      } else if (address === vaultAddress) {
-        await handleVaultLog(provider, raw);
-      }
+        const address = raw.address?.toLowerCase?.() ?? '';
+        const txHash = (raw.transactionHash ?? (raw as any)?.txHash ?? '').toLowerCase();
+        const logIndex = Number((raw as any).index ?? (raw as any).logIndex ?? 0);
+        if (!txHash) continue;
+        const key = `${address}:${txHash}:${logIndex}`;
+        if (seenKeys.has(key)) continue;
+        seenKeys.add(key);
+        storedLogs.push(serializeLog(raw));
     }
   }
 
-  if (rewardToken && rewardSources.length) {
+  if (storedLogs.length) {
+    appendStoredLogs(storedLogs);
+    await ingestJsonLogs(provider);
+  }
+
+  if (rewardToken && env.rewardDistributors.length) {
     for (const distributor of rewardSources) {
       const distributorTopic = `0x${distributor.replace(/^0x/, '').padStart(64, '0')}`;
-      for await (const chunk of getLogsSafe({
+      const chunk = await getLogsWithBackoff({
         address: rewardToken,
         topics: [TRANSFER_TOPIC, distributorTopic],
         fromBlock,
         toBlock
-      })) {
-        for (const raw of chunk as Log[]) {
-          await handleRewardTransferLog(provider, raw);
-        }
+      });
+      for (const raw of chunk as Log[]) {
+        await handleRewardTransferLog(provider, raw);
       }
     }
   }
-
-  await flushPendingMarketStates(provider);
   await flushProfiles();
+}
+
+async function maybeResnapshot(provider: JsonRpcProvider) {
+  if (RESNAPSHOT_INTERVAL_MS <= 0 || nextResnapshotAt === Number.POSITIVE_INFINITY) {
+    return;
+  }
+  const now = Date.now();
+  if (now < nextResnapshotAt) {
+    return;
+  }
+  try {
+    await queueResnapshotForActiveMarkets();
+    await flushPendingMarketStates(provider);
+  } catch (error) {
+    console.warn('nightly_resnapshot_failed', error);
+  } finally {
+    nextResnapshotAt = now + RESNAPSHOT_INTERVAL_MS;
+  }
 }
 
 async function follow() {
   let last = getLastBlock();
-  if (!last) {
-    const h = await head();
-    last = Math.max(0, h - FINALITY_LAG);
-    setLastBlock(last);
-  }
 
   while (true) {
     try {
       const h = await head();
-      const safeTip = Math.max(0, h - FINALITY_LAG);
+      const safeTip = Math.max(0, h - CONFIRMATIONS);
       if (safeTip > last) {
         let from = last + 1;
         while (from <= safeTip) {
           const to = Math.min(from + STEP - 1, safeTip);
           console.log('sync', from, '->', to, '(step', STEP, ')');
-          await runBatch(from, to);
-          setLastBlock(to);
-          from = to + 1;
-          last = to;
+          try {
+            await runBatch(from, to);
+            await flushPendingMarketStates(provider);
+            setLastBlock(to);
+            from = to + 1;
+            last = to;
+            await maybeResnapshot(provider);
+          } catch (error) {
+            if (isTransient(error)) {
+              console.warn('transient getLogs error, retrying', { from, to, error });
+              await sleep(500);
+              continue;
+            }
+            throw error;
+          }
         }
       }
     } catch (err) {
@@ -186,7 +228,34 @@ async function follow() {
   }
 }
 
-follow().catch((err) => {
+async function start() {
+  await ensureSeedOnce({
+    chainId: CHAIN_ID,
+    backfillDays: BACKFILL_DAYS,
+    confirmations: CONFIRMATIONS,
+    provider,
+    log: (...args) => console.log(...args)
+  });
+  const seededCursor = getLastBlock();
+  setMeta('lastBlock', seededCursor);
+  setMeta('lastUpdatedAt', Date.now());
+  try {
+    const row = db.prepare('SELECT COUNT(1) AS c FROM processed_logs').get() as { c?: number } | undefined;
+    const already = Number(row?.c ?? 0);
+    if (process.env.BOOTSTRAP_JSONL === '1' && already === 0) {
+      console.log('bootstrap: ingesting existing JSON logs');
+      await bootstrapFromExisting(provider);
+    } else if (process.env.BOOTSTRAP_JSONL === '1') {
+      console.log('bootstrap skipped: processed logs already present');
+    }
+  } catch (error) {
+    console.warn('bootstrap_check_failed', error);
+  }
+  resetResnapshotSchedule();
+  await follow();
+}
+
+start().catch((err) => {
   console.error(err);
   process.exit(1);
 });

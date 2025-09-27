@@ -25,10 +25,10 @@ export function NearResolutionList({ initial }: { initial: NearResolutionItem[] 
   }, []);
 
   return (
-    <section className="bk-rounded-2xl bk-bg-brand-panel bk-ring-1 bk-ring-brand-ring bk-p-4 bk-space-y-3">
+    <section className="bk-rounded-lg bk-bg-surface bk-ring-1 bk-ring-border bk-shadow-sm bk-p-4 bk-space-y-3">
       <header className="bk-flex bk-items-center bk-justify-between">
-        <h2 className="bk-text-sm bk-uppercase bk-tracking-widest bk-text-brand-muted">Near Resolution</h2>
-        {isPending && <span className="bk-text-xs bk-text-brand-muted">Refreshing…</span>}
+        <h2 className="bk-text-sm bk-uppercase bk-tracking-widest bk-text-muted">Near Resolution</h2>
+        {isPending && <span className="bk-text-xs bk-text-muted">Refreshing…</span>}
       </header>
       <div className="bk-space-y-2">
         {items.map((item) => (
@@ -37,14 +37,14 @@ export function NearResolutionList({ initial }: { initial: NearResolutionItem[] 
               href={`https://context.markets/markets/${item.marketId}`}
               target="_blank"
               rel="noreferrer"
-              className="bk-text-brand-blue"
+              className="bk-text-accent"
             >
               {item.title}
             </a>
-            <span className="bk-text-xs bk-text-brand-muted">{formatDateShort(item.cutoffTs)}</span>
+            <span className="bk-text-xs bk-text-muted">{formatDateShort(item.cutoffTs)}</span>
           </div>
         ))}
-        {items.length === 0 && <p className="bk-text-sm bk-text-brand-muted">Nothing within the next 72h.</p>}
+        {items.length === 0 && <p className="bk-text-sm bk-text-muted">Nothing within the next 72h.</p>}
       </div>
     </section>
   );

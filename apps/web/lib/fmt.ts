@@ -1,16 +1,19 @@
+const LOCALE = "en-AU";
+const TIME_ZONE = "Australia/Melbourne";
+
 export function formatMoney(value: number, precision = 2): string {
-  const formatted = value.toLocaleString(undefined, {
+  const formatted = new Intl.NumberFormat(LOCALE, {
     minimumFractionDigits: precision,
     maximumFractionDigits: precision
-  });
+  }).format(value);
   return `$${formatted}`;
 }
 
 export function formatNumber(value: number, precision = 2): string {
-  return value.toLocaleString(undefined, {
+  return new Intl.NumberFormat(LOCALE, {
     minimumFractionDigits: precision,
     maximumFractionDigits: precision
-  });
+  }).format(value);
 }
 
 export function formatHoursUntil(timestamp: number): string {
@@ -25,11 +28,23 @@ export function formatHoursUntil(timestamp: number): string {
 
 export function formatDateShort(timestamp: number): string {
   const date = new Date(timestamp * 1000);
-  return date.toLocaleString(undefined, {
+  const formatter = new Intl.DateTimeFormat(LOCALE, {
     month: "short",
     day: "2-digit",
     hour: "2-digit",
     minute: "2-digit",
-    hour12: false
+    hour12: false,
+    timeZone: TIME_ZONE
   });
+
+  const parts = formatter.formatToParts(date);
+  const lookup = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  const day = lookup.day ?? "";
+  const month = lookup.month ?? "";
+  let hour = lookup.hour ?? "";
+  const minute = lookup.minute ?? "";
+  if (hour === "24") {
+    hour = "00";
+  }
+  return `${day} ${month}, ${hour}:${minute}`.trim();
 }

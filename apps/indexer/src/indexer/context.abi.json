@@ -1,0 +1,97 @@
+[
+  {
+    "type": "event",
+    "name": "MarketCreated",
+    "inputs": [
+      { "name": "marketId", "type": "bytes32", "indexed": true, "internalType": "bytes32" },
+      { "name": "oracle", "type": "address", "indexed": true, "internalType": "address" },
+      { "name": "questionId", "type": "bytes32", "indexed": true, "internalType": "bytes32" },
+      { "name": "surplusRecipient", "type": "address", "indexed": false, "internalType": "address" },
+      { "name": "creator", "type": "address", "indexed": false, "internalType": "address" },
+      { "name": "metadata", "type": "bytes", "indexed": false, "internalType": "bytes" },
+      { "name": "alpha", "type": "uint256", "indexed": false, "internalType": "uint256" },
+      { "name": "marketCreationFee", "type": "uint256", "indexed": false, "internalType": "uint256" },
+      { "name": "outcomeTokens", "type": "address[]", "indexed": false, "internalType": "address[]" },
+      { "name": "outcomeNames", "type": "string[]", "indexed": false, "internalType": "string[]" },
+      { "name": "outcomeQs", "type": "uint256[]", "indexed": false, "internalType": "uint256[]" }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "MarketTraded",
+    "inputs": [
+      { "name": "marketId", "type": "bytes32", "indexed": true, "internalType": "bytes32" },
+      { "name": "trader", "type": "address", "indexed": true, "internalType": "address" },
+      { "name": "alpha", "type": "uint256", "indexed": false, "internalType": "uint256" },
+      { "name": "usdcFlow", "type": "int256", "indexed": false, "internalType": "int256" },
+      { "name": "deltaShares", "type": "int256[]", "indexed": false, "internalType": "int256[]" },
+      { "name": "outcomeQs", "type": "uint256[]", "indexed": false, "internalType": "uint256[]" }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "LockUpdated",
+    "inputs": [
+      { "name": "marketId", "type": "bytes32", "indexed": true, "internalType": "bytes32" },
+      { "name": "locker", "type": "address", "indexed": true, "internalType": "address" },
+      { "name": "amounts", "type": "uint256[]", "indexed": false, "internalType": "uint256[]" }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "StakeUpdated",
+    "inputs": [
+      { "name": "marketId", "type": "bytes32", "indexed": true, "internalType": "bytes32" },
+      { "name": "staker", "type": "address", "indexed": true, "internalType": "address" },
+      { "name": "amounts", "type": "uint256[]", "indexed": false, "internalType": "uint256[]" }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "Unlocked",
+    "inputs": [
+      { "name": "marketId", "type": "bytes32", "indexed": true, "internalType": "bytes32" },
+      { "name": "locker", "type": "address", "indexed": true, "internalType": "address" },
+      { "name": "amounts", "type": "uint256[]", "indexed": false, "internalType": "uint256[]" }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "SponsoredLocked",
+    "inputs": [
+      { "name": "marketId", "type": "bytes32", "indexed": true, "internalType": "bytes32" },
+      { "name": "user", "type": "address", "indexed": true, "internalType": "address" },
+      { "name": "setsAmount", "type": "uint256", "indexed": false, "internalType": "uint256" },
+      { "name": "userPaid", "type": "uint256", "indexed": false, "internalType": "uint256" },
+      { "name": "subsidyUsed", "type": "uint256", "indexed": false, "internalType": "uint256" },
+      { "name": "actualCost", "type": "uint256", "indexed": false, "internalType": "uint256" },
+      { "name": "outcomes", "type": "uint256", "indexed": false, "internalType": "uint256" },
+      { "name": "nonce", "type": "uint256", "indexed": false, "internalType": "uint256" }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "EpochRootSet",
+    "inputs": [
+      { "name": "epochId", "type": "uint256", "indexed": true, "internalType": "uint256" },
+      { "name": "merkleRoot", "type": "bytes32", "indexed": false, "internalType": "bytes32" }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "RewardClaimed",
+    "inputs": [
+      { "name": "epochId", "type": "uint256", "indexed": true, "internalType": "uint256" },
+      { "name": "user", "type": "address", "indexed": true, "internalType": "address" },
+      { "name": "amount", "type": "uint256", "indexed": false, "internalType": "uint256" }
+    ],
+    "anonymous": false
+  }
+]

@@ -1,6 +1,13 @@
 import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
 
+const CHAIN_ID = 8453;
+
+const toMicrosString = (value: number): string => {
+  if (!Number.isFinite(value)) return "0";
+  return Math.trunc(value).toString();
+};
+
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
   const sinceParam = Number(searchParams.get("since") ?? Date.now() - 24 * 3600 * 1000);
@@ -48,11 +55,11 @@ export async function GET(request: Request) {
     .map((row) => ({
       ...row,
       wallet: row.wallet ?? null,
-      amount: row.amount != null ? Number(row.amount) / 1e6 : null
+      amount: row.amount != null ? toMicrosString(row.amount) : null
     }))
     .sort((a, b) => a.ts - b.ts)
     .slice(-limit)
     .reverse();
 
-  return NextResponse.json({ since: sinceParam, limit, rows });
+  return NextResponse.json({ chainId: CHAIN_ID, since: sinceParam, limit, rows });
 }

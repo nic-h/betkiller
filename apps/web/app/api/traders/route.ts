@@ -1,11 +1,25 @@
 import { NextResponse } from "next/server";
 import { db, cutoff, hasTable } from "@/lib/db";
 
+const CHAIN_ID = 8453;
+
+const toMicrosString = (value: unknown): string => {
+  if (value === null || value === undefined) return "0";
+  if (typeof value === "string") return value;
+  if (typeof value === "bigint") return value.toString();
+  if (typeof value === "number") return Math.trunc(value).toString();
+  try {
+    return BigInt(value as any).toString();
+  } catch (error) {
+    return String(value ?? 0);
+  }
+};
+
 const SORTABLE = new Set(["pnl", "volume", "rewards"]);
 
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
-  const range = searchParams.get("range") ?? "7d";
+  const range = (searchParams.get("range") ?? "14d").toLowerCase();
   const since = cutoff(range);
   const sortParam = searchParams.get("sort") ?? "pnl";
   const sort = SORTABLE.has(sortParam) ? sortParam : "pnl";
@@ -15,6 +29,7 @@ export async function GET(request: Request) {
   const database = db();
   const hasRewards = hasTable("reward_claims");
   const hasRedeems = hasTable("redemptions");
+  const hasSponsoredLocks = hasTable("sponsored_locks");
 
   const rewardsCTE = hasRewards
     ? `SELECT lower(user) AS addr, SUM(CAST(amount AS INTEGER)) AS rewards
@@ -32,6 +47,20 @@ export async function GET(request: Request) {
        GROUP BY lower(user)`
     : `SELECT NULL AS addr, 0 AS winningMarkets, 0 AS winnings`;
 
+  const boostsCTE = hasSponsoredLocks
+    ? `SELECT lower(user) AS addr,
+             SUM(CAST(COALESCE(userPaid, 0) AS INTEGER)) AS boostPaid,
+             SUM(CAST(COALESCE(subsidyUsed, 0) AS INTEGER)) AS boostSponsored
+       FROM sponsored_locks
+       WHERE ts >= ? AND user IS NOT NULL
+       GROUP BY lower(user)`
+    : `SELECT lower(user) AS addr,
+             SUM(CAST(COALESCE(json_extract(payloadJson, '$.userPaid'), 0) AS INTEGER)) AS boostPaid,
+             SUM(CAST(COALESCE(json_extract(payloadJson, '$.subsidyUsed'), 0) AS INTEGER)) AS boostSponsored
+       FROM locks
+       WHERE ts >= ? AND user IS NOT NULL
+       GROUP BY lower(user)`;
+
   const sql = `
     WITH t AS (
       SELECT lower(trader) AS addr,
@@ -44,22 +73,18 @@ export async function GET(request: Request) {
       GROUP BY lower(trader)
     ),
     r AS (${rewardsCTE}),
-    b AS (
-      SELECT lower(user) AS addr,
-             SUM(CAST(COALESCE(json_extract(payloadJson, '$.userPaid'), 0) AS INTEGER)) AS boostPaid,
-             SUM(CAST(COALESCE(json_extract(payloadJson, '$.subsidyUsed'), 0) AS INTEGER)) AS boostSponsored
-      FROM locks
-      WHERE user IS NOT NULL AND ts >= ?
-      GROUP BY lower(user)
-    ),
+    b AS (${boostsCTE}),
     w AS (${redeemsCTE})
     SELECT lower(COALESCE(t.addr, r.addr, b.addr, w.addr)) AS addr,
-           ROUND((COALESCE(w.winnings, 0) + COALESCE(r.rewards, 0) - COALESCE(t.netBuys, 0)) / 1e6, 2) AS pnl,
-           ROUND(COALESCE(r.rewards, 0) / 1e6, 2) AS claimedRewards,
-           ROUND(COALESCE(b.boostPaid, 0) / 1e6, 2) AS boostSpend,
-           ROUND((COALESCE(r.rewards, 0) - COALESCE(b.boostPaid, 0)) / 1e6, 2) AS boostROI,
+           COALESCE(w.winnings, 0) + COALESCE(r.rewards, 0) - COALESCE(t.netBuys, 0) AS pnl,
+           COALESCE(r.rewards, 0) AS claimedRewards,
+           COALESCE(b.boostPaid, 0) AS boostSpend,
+           CASE
+             WHEN COALESCE(b.boostPaid, 0) > 0 THEN (1.0 * (COALESCE(r.rewards, 0) - COALESCE(b.boostPaid, 0))) / COALESCE(b.boostPaid, 0)
+             ELSE NULL
+           END AS boostROI,
            ROUND(1.0 * COALESCE(w.winningMarkets, 0) / NULLIF(t.marketsTouched, 0), 4) AS winRate,
-           ROUND(COALESCE(t.volume, 0) / 1e6, 2) AS volume,
+           COALESCE(t.volume, 0) AS volume,
            COALESCE(t.marketsTouched, 0) AS marketsTouched,
            COALESCE(t.lastSeen, 0) AS lastSeen
     FROM t
@@ -78,15 +103,32 @@ export async function GET(request: Request) {
 
   const rows = database.prepare(sql).all(...params) as Array<{
     addr: string;
-    pnl: number;
-    claimedRewards: number;
-    boostSpend: number;
-    boostROI: number;
+    pnl: number | string | null;
+    claimedRewards: number | string | null;
+    boostSpend: number | string | null;
+    boostROI: number | null;
     winRate: number | null;
-    volume: number;
-    marketsTouched: number;
-    lastSeen: number;
+    volume: number | string | null;
+    marketsTouched: number | null;
+    lastSeen: number | null;
   }>;
 
-  return NextResponse.json({ range, sort, limit, offset, rows });
+  return NextResponse.json({
+    chainId: CHAIN_ID,
+    range,
+    sort,
+    limit,
+    offset,
+    rows: rows.map((row) => ({
+      addr: row.addr,
+      pnl: toMicrosString(row.pnl ?? 0),
+      claimedRewards: toMicrosString(row.claimedRewards ?? 0),
+      boostSpend: toMicrosString(row.boostSpend ?? 0),
+      boostROI: row.boostROI ?? null,
+      winRate: row.winRate ?? null,
+      volume: toMicrosString(row.volume ?? 0),
+      marketsTouched: row.marketsTouched ?? 0,
+      lastSeen: row.lastSeen ?? 0
+    }))
+  });
 }

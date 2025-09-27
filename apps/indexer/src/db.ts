@@ -20,6 +20,22 @@ db.pragma("cache_size = -200000");
 db.pragma("temp_store = MEMORY");
 
 db.exec(`
+CREATE TABLE IF NOT EXISTS indexer_cursor (
+  chain_id INTEGER PRIMARY KEY,
+  last_block INTEGER NOT NULL,
+  last_ts INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS indexer_meta (
+  chain_id INTEGER PRIMARY KEY,
+  seed_from_block INTEGER,
+  seed_from_ts INTEGER,
+  seed_window_days INTEGER,
+  seed_completed INTEGER DEFAULT 0,
+  created_at INTEGER,
+  updated_at INTEGER
+);
+
 CREATE TABLE IF NOT EXISTS markets (
   marketId TEXT PRIMARY KEY,
   creator TEXT,
@@ -43,8 +59,10 @@ CREATE TABLE IF NOT EXISTS prices (
 CREATE TABLE IF NOT EXISTS trades (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   ts INTEGER NOT NULL,
+  blockNumber TEXT,
   marketId TEXT NOT NULL,
   txHash TEXT NOT NULL,
+  logIndex INTEGER NOT NULL DEFAULT 0,
   usdcIn TEXT NOT NULL,
   usdcOut TEXT NOT NULL,
   FOREIGN KEY (marketId) REFERENCES markets(marketId)
@@ -65,7 +83,13 @@ CREATE TABLE IF NOT EXISTS locks (
   marketId TEXT NOT NULL,
   user TEXT NOT NULL,
   type TEXT NOT NULL,
-  payloadJson TEXT NOT NULL
+  payloadJson TEXT NOT NULL,
+  txHash TEXT,
+  logIndex INTEGER,
+  locker TEXT,
+  amounts TEXT,
+  kind TEXT,
+  blockNumber INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS rewards (
@@ -136,15 +160,163 @@ CREATE TABLE IF NOT EXISTS reward_claims (
   amount TEXT NOT NULL,
   UNIQUE (txHash, logIndex)
 );
+
+CREATE TABLE IF NOT EXISTS stakes (
+  txHash TEXT NOT NULL,
+  logIndex INTEGER NOT NULL,
+  marketId TEXT NOT NULL,
+  staker TEXT NOT NULL,
+  amounts TEXT NOT NULL,
+  blockNumber INTEGER NOT NULL,
+  ts INTEGER NOT NULL,
+  PRIMARY KEY(txHash, logIndex)
+);
+
+CREATE TABLE IF NOT EXISTS sponsored_locks (
+  txHash TEXT NOT NULL,
+  logIndex INTEGER NOT NULL,
+  marketId TEXT NOT NULL,
+  user TEXT NOT NULL,
+  setsAmount TEXT,
+  userPaid TEXT,
+  subsidyUsed TEXT,
+  actualCost TEXT,
+  outcomes INTEGER,
+  nonce TEXT,
+  blockNumber INTEGER NOT NULL,
+  ts INTEGER NOT NULL,
+  PRIMARY KEY(txHash, logIndex)
+);
+
+CREATE TABLE IF NOT EXISTS surplus_withdrawals (
+  txHash TEXT NOT NULL,
+  logIndex INTEGER NOT NULL,
+  toAddr TEXT NOT NULL,
+  amount TEXT NOT NULL,
+  blockNumber INTEGER NOT NULL,
+  ts INTEGER NOT NULL,
+  PRIMARY KEY(txHash, logIndex)
+);
 `);
+
+const selectCursorStmt = db.prepare(
+  'SELECT last_block as lastBlock, last_ts as lastTs FROM indexer_cursor WHERE chain_id = ?'
+);
+
+const upsertCursorStmt = db.prepare(`
+INSERT INTO indexer_cursor(chain_id, last_block, last_ts)
+VALUES (@chainId, @lastBlock, @lastTs)
+ON CONFLICT(chain_id) DO UPDATE SET
+  last_block = excluded.last_block,
+  last_ts = excluded.last_ts
+`);
+
+const selectSeedMetaStmt = db.prepare(
+  `SELECT seed_from_block as seedFromBlock,
+          seed_from_ts as seedFromTs,
+          seed_window_days as seedWindowDays,
+          seed_completed as seedCompleted,
+          created_at as createdAt,
+          updated_at as updatedAt
+   FROM indexer_meta WHERE chain_id = ?`
+);
+
+const upsertSeedMetaStmt = db.prepare(`
+INSERT INTO indexer_meta(chain_id, seed_from_block, seed_from_ts, seed_window_days, seed_completed, created_at, updated_at)
+VALUES (@chainId, @seedFromBlock, @seedFromTs, @seedWindowDays, @seedCompleted, @createdAt, @updatedAt)
+ON CONFLICT(chain_id) DO UPDATE SET
+  seed_from_block = excluded.seed_from_block,
+  seed_from_ts = excluded.seed_from_ts,
+  seed_window_days = excluded.seed_window_days,
+  seed_completed = excluded.seed_completed,
+  updated_at = excluded.updated_at
+`);
+
+export function getIndexerCursor(chainId: number): { lastBlock: number; lastTs: number } | undefined {
+  const row = selectCursorStmt.get(chainId) as { lastBlock?: number; lastTs?: number } | undefined;
+  if (!row || row.lastBlock == null || row.lastTs == null) return undefined;
+  return { lastBlock: Number(row.lastBlock), lastTs: Number(row.lastTs) };
+}
+
+export function setIndexerCursor(chainId: number, lastBlock: number, lastTs: number) {
+  upsertCursorStmt.run({ chainId, lastBlock: Math.trunc(lastBlock), lastTs: Math.trunc(lastTs) });
+}
+
+export type SeedMetaRow = {
+  seedFromBlock: number | null;
+  seedFromTs: number | null;
+  seedWindowDays: number | null;
+  seedCompleted: number | null;
+  createdAt: number | null;
+  updatedAt: number | null;
+};
+
+export function getSeedMeta(chainId: number): SeedMetaRow | undefined {
+  const row = selectSeedMetaStmt.get(chainId) as SeedMetaRow | undefined;
+  if (!row) return undefined;
+  return {
+    seedFromBlock: row.seedFromBlock != null ? Number(row.seedFromBlock) : null,
+    seedFromTs: row.seedFromTs != null ? Number(row.seedFromTs) : null,
+    seedWindowDays: row.seedWindowDays != null ? Number(row.seedWindowDays) : null,
+    seedCompleted: row.seedCompleted != null ? Number(row.seedCompleted) : null,
+    createdAt: row.createdAt != null ? Number(row.createdAt) : null,
+    updatedAt: row.updatedAt != null ? Number(row.updatedAt) : null
+  };
+}
+
+export function upsertSeedMeta(row: {
+  chainId: number;
+  seedFromBlock: number | null;
+  seedFromTs: number | null;
+  seedWindowDays: number | null;
+  seedCompleted: number;
+  createdAt: number;
+  updatedAt: number;
+}) {
+  upsertSeedMetaStmt.run({
+    chainId: row.chainId,
+    seedFromBlock: row.seedFromBlock,
+    seedFromTs: row.seedFromTs,
+    seedWindowDays: row.seedWindowDays,
+    seedCompleted: row.seedCompleted,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt
+  });
+}
 
 const tradeColumns = db.prepare('PRAGMA table_info(trades)').all() as { name: string }[];
 if (!tradeColumns.some((c) => c.name === 'trader')) {
   db.exec('ALTER TABLE trades ADD COLUMN trader TEXT');
 }
+if (!tradeColumns.some((c) => c.name === 'logIndex')) {
+  db.exec('ALTER TABLE trades ADD COLUMN logIndex INTEGER DEFAULT 0');
+}
+if (!tradeColumns.some((c) => c.name === 'blockNumber')) {
+  db.exec('ALTER TABLE trades ADD COLUMN blockNumber TEXT');
+}
+
+const lockColumns = db.prepare('PRAGMA table_info(locks)').all() as { name: string }[];
+if (!lockColumns.some((c) => c.name === 'txHash')) {
+  db.exec('ALTER TABLE locks ADD COLUMN txHash TEXT');
+}
+if (!lockColumns.some((c) => c.name === 'logIndex')) {
+  db.exec('ALTER TABLE locks ADD COLUMN logIndex INTEGER');
+}
+if (!lockColumns.some((c) => c.name === 'locker')) {
+  db.exec('ALTER TABLE locks ADD COLUMN locker TEXT');
+}
+if (!lockColumns.some((c) => c.name === 'amounts')) {
+  db.exec('ALTER TABLE locks ADD COLUMN amounts TEXT');
+}
+if (!lockColumns.some((c) => c.name === 'kind')) {
+  db.exec('ALTER TABLE locks ADD COLUMN kind TEXT');
+}
+if (!lockColumns.some((c) => c.name === 'blockNumber')) {
+  db.exec('ALTER TABLE locks ADD COLUMN blockNumber INTEGER');
+}
 
 db.exec(`
-CREATE UNIQUE INDEX IF NOT EXISTS idx_trades_tx ON trades(txHash);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_trades_txlog ON trades(txHash, logIndex);
 CREATE INDEX IF NOT EXISTS idx_prices_market_ts ON prices(marketId, ts);
 CREATE INDEX IF NOT EXISTS idx_impact_market ON impact(marketId);
 CREATE INDEX IF NOT EXISTS idx_locks_ts ON locks(ts);
@@ -159,7 +331,18 @@ CREATE INDEX IF NOT EXISTS idx_resolutions_ts ON resolutions(ts);
 CREATE INDEX IF NOT EXISTS idx_redemptions_user_ts ON redemptions(user, ts);
 CREATE INDEX IF NOT EXISTS idx_redemptions_market_ts ON redemptions(marketId, ts);
 CREATE INDEX IF NOT EXISTS idx_reward_claims_user_ts ON reward_claims(user, ts);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_locks_txlog ON locks(txHash, logIndex);
+CREATE INDEX IF NOT EXISTS idx_stakes_market_ts ON stakes(marketId, ts);
+CREATE INDEX IF NOT EXISTS idx_sponsored_locks_market_ts ON sponsored_locks(marketId, ts);
+CREATE INDEX IF NOT EXISTS idx_surplus_withdrawals_ts ON surplus_withdrawals(ts);
 `);
+
+const activeMarketsStmt = db.prepare(
+  `SELECT m.marketId
+   FROM markets m
+   LEFT JOIN resolutions r ON r.marketId = m.marketId
+   WHERE r.marketId IS NULL`
+);
 
 type ProcessedLogKey = {
   contract: string;
@@ -167,14 +350,14 @@ type ProcessedLogKey = {
   logIndex: number;
 };
 
-type ProcessedLogInsert = ProcessedLogKey & { blockNumber: bigint };
+type ProcessedLogInsert = ProcessedLogKey & { blockNumber: bigint | number };
 
 const processedLogExistsStmt = db.prepare(
   `SELECT 1 FROM processed_logs WHERE contract = ? AND txHash = ? AND logIndex = ?`
 );
 
 const insertProcessedLogStmt = db.prepare(`
-INSERT INTO processed_logs(contract, txHash, logIndex, blockNumber)
+INSERT OR IGNORE INTO processed_logs(contract, txHash, logIndex, blockNumber)
 VALUES (@contract, @txHash, @logIndex, @blockNumber)
 `);
 
@@ -202,8 +385,14 @@ export function recordProcessedLog(identity: ProcessedLogInsert) {
     contract: identity.contract,
     txHash: identity.txHash,
     logIndex: identity.logIndex,
-    blockNumber: identity.blockNumber.toString()
+    blockNumber:
+      typeof identity.blockNumber === 'bigint' ? identity.blockNumber.toString() : String(identity.blockNumber)
   });
+}
+
+export function getActiveMarketIds(): string[] {
+  const rows = activeMarketsStmt.all() as { marketId: string }[];
+  return rows.map((row) => row.marketId);
 }
 
 export type MarketInsert = {
@@ -259,36 +448,144 @@ export function insertPrice(row: { ts: number; marketId: string; prices: bigint[
   });
 }
 
-export function insertTrade(row: { ts: number; marketId: string; txHash: string; trader: string; usdcIn: bigint; usdcOut: bigint }) {
-  db.prepare(
-    `INSERT INTO trades(ts, marketId, txHash, trader, usdcIn, usdcOut)
-     VALUES (@ts, @marketId, @txHash, @trader, @usdcIn, @usdcOut)`
-  ).run({
+const insertTradeStmt = db.prepare(
+  `INSERT OR IGNORE INTO trades(ts, blockNumber, marketId, txHash, logIndex, trader, usdcIn, usdcOut)
+   VALUES (@ts, @blockNumber, @marketId, @txHash, @logIndex, @trader, @usdcIn, @usdcOut)`
+);
+
+const insertLockStmt = db.prepare(
+  `INSERT OR IGNORE INTO locks(txHash, logIndex, marketId, locker, amounts, kind, blockNumber, ts, user, type, payloadJson)
+   VALUES (@txHash, @logIndex, @marketId, @locker, @amounts, @kind, @blockNumber, @ts, @user, @type, @payloadJson)`
+);
+
+const insertStakeStmt = db.prepare(
+  `INSERT OR IGNORE INTO stakes(txHash, logIndex, marketId, staker, amounts, blockNumber, ts)
+   VALUES (@txHash, @logIndex, @marketId, @staker, @amounts, @blockNumber, @ts)`
+);
+
+const insertSponsoredLockStmt = db.prepare(
+  `INSERT OR IGNORE INTO sponsored_locks(txHash, logIndex, marketId, user, setsAmount, userPaid, subsidyUsed, actualCost, outcomes, nonce, blockNumber, ts)
+   VALUES (@txHash, @logIndex, @marketId, @user, @setsAmount, @userPaid, @subsidyUsed, @actualCost, @outcomes, @nonce, @blockNumber, @ts)`
+);
+
+const insertSurplusWithdrawalStmt = db.prepare(
+  `INSERT OR IGNORE INTO surplus_withdrawals(txHash, logIndex, toAddr, amount, blockNumber, ts)
+   VALUES (@txHash, @logIndex, @toAddr, @amount, @blockNumber, @ts)`
+);
+
+export function insertTrade(row: {
+  ts: number;
+  blockNumber: number;
+  marketId: string;
+  txHash: string;
+  logIndex: number;
+  trader: string;
+  usdcIn: bigint;
+  usdcOut: bigint;
+}) {
+  insertTradeStmt.run({
     ts: row.ts,
+    blockNumber: row.blockNumber.toString(),
     marketId: row.marketId,
     txHash: row.txHash,
+    logIndex: row.logIndex,
     trader: row.trader,
     usdcIn: row.usdcIn.toString(),
     usdcOut: row.usdcOut.toString()
   });
 }
 
-const tradeExistsStmt = db.prepare('SELECT 1 FROM trades WHERE txHash = ?');
-
-export function tradeExists(txHash: string): boolean {
-  return Boolean(tradeExistsStmt.get(txHash));
+export function insertLockEvent(row: {
+  txHash: string;
+  logIndex: number;
+  marketId: string;
+  locker: string;
+  kind: string;
+  amounts: string[];
+  blockNumber: number;
+  ts: number;
+  payload?: unknown;
+}) {
+  insertLockStmt.run({
+    txHash: row.txHash,
+    logIndex: row.logIndex,
+    marketId: row.marketId,
+    locker: row.locker,
+    amounts: JSON.stringify(row.amounts),
+    kind: row.kind,
+    blockNumber: row.blockNumber,
+    ts: row.ts,
+    user: row.locker,
+    type: row.kind,
+    payloadJson: JSON.stringify(row.payload ?? { amounts: row.amounts })
+  });
 }
 
-export function insertLockEvent(row: { ts: number; marketId: string; user: string; type: string; payload: unknown }) {
-  db.prepare(
-    `INSERT INTO locks(ts, marketId, user, type, payloadJson)
-     VALUES (@ts, @marketId, @user, @type, @payloadJson)`
-  ).run({
-    ts: row.ts,
+export function insertStakeEvent(row: {
+  txHash: string;
+  logIndex: number;
+  marketId: string;
+  staker: string;
+  amounts: string[];
+  blockNumber: number;
+  ts: number;
+}) {
+  insertStakeStmt.run({
+    txHash: row.txHash,
+    logIndex: row.logIndex,
+    marketId: row.marketId,
+    staker: row.staker,
+    amounts: JSON.stringify(row.amounts),
+    blockNumber: row.blockNumber,
+    ts: row.ts
+  });
+}
+
+export function insertSponsoredLock(row: {
+  txHash: string;
+  logIndex: number;
+  marketId: string;
+  user: string;
+  setsAmount: string | null;
+  userPaid: string | null;
+  subsidyUsed: string | null;
+  actualCost: string | null;
+  outcomes: number | null;
+  nonce: string | null;
+  blockNumber: number;
+  ts: number;
+}) {
+  insertSponsoredLockStmt.run({
+    txHash: row.txHash,
+    logIndex: row.logIndex,
     marketId: row.marketId,
     user: row.user,
-    type: row.type,
-    payloadJson: JSON.stringify(row.payload)
+    setsAmount: row.setsAmount,
+    userPaid: row.userPaid,
+    subsidyUsed: row.subsidyUsed,
+    actualCost: row.actualCost,
+    outcomes: row.outcomes,
+    nonce: row.nonce,
+    blockNumber: row.blockNumber,
+    ts: row.ts
+  });
+}
+
+export function insertSurplusWithdrawal(row: {
+  txHash: string;
+  logIndex: number;
+  toAddr: string;
+  amount: string;
+  blockNumber: number;
+  ts: number;
+}) {
+  insertSurplusWithdrawalStmt.run({
+    txHash: row.txHash,
+    logIndex: row.logIndex,
+    toAddr: row.toAddr,
+    amount: row.amount,
+    blockNumber: row.blockNumber,
+    ts: row.ts
   });
 }
 
@@ -434,19 +731,4 @@ const selectMarketStmt = db.prepare('SELECT marketId FROM markets WHERE marketId
 
 export function marketExists(marketId: string): boolean {
   return Boolean(selectMarketStmt.get(marketId));
-}
-
-export function insertMarketStub(marketId: string, createdAt: number) {
-  if (marketExists(marketId)) return;
-  insertMarket({
-    marketId: marketId as `0x${string}`,
-    creator: '0x0000000000000000000000000000000000000000',
-    oracle: '0x0000000000000000000000000000000000000000',
-    surplusRecipient: '0x0000000000000000000000000000000000000000',
-    questionId: '0x0000000000000000000000000000000000000000000000000000000000000000' as `0x${string}`,
-    outcomeNames: [],
-    metadata: null,
-    txHash: '0x0000000000000000000000000000000000000000000000000000000000000000' as `0x${string}`,
-    createdAt
-  });
 }

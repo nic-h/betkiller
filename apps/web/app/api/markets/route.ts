@@ -5,7 +5,7 @@ const STATUS_OPTIONS = new Set(["active", "resolved", "all"]);
 
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
-  const range = searchParams.get("range") ?? "24h";
+  const range = (searchParams.get("range") ?? "14d").toLowerCase();
   const since = cutoff(range);
   const statusParam = searchParams.get("status") ?? "active";
   const status = STATUS_OPTIONS.has(statusParam) ? statusParam : "active";
@@ -39,7 +39,7 @@ export async function GET(request: Request) {
       ${resolutionsJoin}
     ),
     vol AS (
-      SELECT marketId, SUM(CAST(usdcIn AS INTEGER) + CAST(usdcOut AS INTEGER)) AS v
+      SELECT marketId, SUM(CAST(usdcIn AS INTEGER) + CAST(usdcOut AS INTEGER)) AS volumeMicros
       FROM trades
       WHERE ts >= ?
       GROUP BY marketId
@@ -52,9 +52,9 @@ export async function GET(request: Request) {
     ),
     boosts AS (
       SELECT marketId,
-             SUM(CAST(COALESCE(json_extract(payloadJson, '$.userPaid'), 0) AS INTEGER)) AS paid,
-             SUM(CAST(COALESCE(json_extract(payloadJson, '$.subsidyUsed'), 0) AS INTEGER)) AS sponsored
-      FROM locks
+             SUM(CAST(COALESCE(userPaid, 0) AS INTEGER)) AS paid,
+             SUM(CAST(COALESCE(subsidyUsed, 0) AS INTEGER)) AS sponsored
+      FROM sponsored_locks
       WHERE ts >= ?
       GROUP BY marketId
     )
@@ -62,17 +62,17 @@ export async function GET(request: Request) {
            s.status,
            s.creator,
            s.cutoffAt,
-           ROUND(COALESCE(s.totalUsdc, 0) / 1e6, 2) AS tvl,
-           ROUND(COALESCE(vol.v, 0) / 1e6, 2) AS volume24h,
+           COALESCE(s.totalUsdc, '0') AS tvlMicros,
+           COALESCE(vol.volumeMicros, 0) AS volumeMicros,
            COALESCE(actors.traders, 0) AS traders,
-           ROUND(COALESCE(boosts.paid, 0) / 1e6, 2) AS boostPaid,
-           ROUND(COALESCE(boosts.sponsored, 0) / 1e6, 2) AS boostSponsored
+           COALESCE(boosts.paid, 0) AS boostPaidMicros,
+           COALESCE(boosts.sponsored, 0) AS boostSponsoredMicros
     FROM state s
     LEFT JOIN vol ON vol.marketId = s.marketId
     LEFT JOIN actors ON actors.marketId = s.marketId
     LEFT JOIN boosts ON boosts.marketId = s.marketId
     WHERE (? = 'all' OR s.status = ?)
-    ORDER BY tvl DESC
+    ORDER BY CAST(tvlMicros AS INTEGER) DESC
     LIMIT ? OFFSET ?`;
 
   const rows = database
@@ -82,12 +82,36 @@ export async function GET(request: Request) {
       status: string;
       creator: string | null;
       cutoffAt: number | null;
-      tvl: number;
-      volume24h: number;
+      tvlMicros: string;
+      volumeMicros: number | string | null;
       traders: number;
-      boostPaid: number;
-      boostSponsored: number;
+      boostPaidMicros: number | string | null;
+      boostSponsoredMicros: number | string | null;
     }>;
 
-  return NextResponse.json({ range, status, limit, offset, rows });
+  const toMicrosString = (value: unknown): string => {
+    if (value === null || value === undefined) return "0";
+    if (typeof value === "string") return value;
+    if (typeof value === "bigint") return value.toString();
+    if (typeof value === "number") return Math.trunc(value).toString();
+    try {
+      return BigInt(value as any).toString();
+    } catch (error) {
+      return String(value ?? 0);
+    }
+  };
+
+  const enriched = rows.map((row) => ({
+    marketId: row.marketId,
+    status: row.status,
+    creator: row.creator,
+    cutoffAt: row.cutoffAt ?? null,
+    tvl: toMicrosString(row.tvlMicros),
+    volume: toMicrosString(row.volumeMicros),
+    traders: row.traders ?? 0,
+    boostPaid: toMicrosString(row.boostPaidMicros),
+    boostSponsored: toMicrosString(row.boostSponsoredMicros)
+  }));
+
+  return NextResponse.json({ chainId: 8453, range, status, limit, offset, rows: enriched });
 }

@@ -2,6 +2,7 @@ import Database, { type Database as BetterSqliteDatabase } from "better-sqlite3"
 import { Buffer } from "buffer";
 import fs from "fs";
 import path from "path";
+import { gunzipSync } from "node:zlib";
 
 const DB_PATH =
   process.env.SQLITE_PATH ?? process.env.BK_DB ?? process.env.DATABASE_PATH ?? "../../data/context-edge.db";
@@ -40,19 +41,26 @@ export function hasTable(name: string): boolean {
 }
 
 export function cutoff(range?: string): number {
-  const now = Math.floor(Date.now() / 1000);
+  const nowSec = Math.floor(Date.now() / 1000);
   const day = 24 * 60 * 60;
-  switch (range) {
+  const normalized = (range ?? "14d").toLowerCase();
+  switch (normalized) {
     case "24h":
-      return now - day;
+      return nowSec - day;
     case "7d":
-      return now - 7 * day;
+      return nowSec - 7 * day;
     case "30d":
-      return now - 30 * day;
-    case "14d":
-      return now - 14 * day;
-    default:
+      return nowSec - 30 * day;
+    case "ytd": {
+      const now = new Date();
+      const start = Date.UTC(now.getUTCFullYear(), 0, 1) / 1000;
+      return Math.floor(start);
+    }
+    case "all":
       return 0;
+    case "14d":
+    default:
+      return nowSec - 14 * day;
   }
 }
 
@@ -72,34 +80,54 @@ function microsToNumber(value: unknown): number {
 
 function sumPayloadAmounts(payloadJson: string): bigint {
   try {
-    const parsed = JSON.parse(payloadJson ?? "[]");
-    if (!Array.isArray(parsed)) return 0n;
-    return parsed.reduce<bigint>((acc, curr) => {
-      try {
-        return acc + BigInt(curr);
-      } catch (err) {
-        return acc;
-      }
-    }, 0n);
+    const parsed = JSON.parse(payloadJson ?? '[]');
+    return aggregateAmounts(parsed);
   } catch (error) {
     return 0n;
   }
 }
 
-function rangeToSeconds(range: string): number {
-  switch (range) {
-    case "24h":
-      return 24 * 3600;
-    case "7d":
-      return 7 * 24 * 3600;
-    case "14d":
-    default:
-      return 14 * 24 * 3600;
+function aggregateAmounts(value: unknown): bigint {
+  if (value === null || value === undefined) return 0n;
+  if (typeof value === 'bigint') return value;
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? BigInt(Math.trunc(value)) : 0n;
   }
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (!trimmed) return 0n;
+    try {
+      return BigInt(trimmed);
+    } catch (error) {
+      return 0n;
+    }
+  }
+  if (Array.isArray(value)) {
+    return value.reduce<bigint>((acc, entry) => acc + aggregateAmounts(entry), 0n);
+  }
+  if (typeof value === 'object') {
+    const obj = value as Record<string, unknown>;
+    let total = 0n;
+    if (Array.isArray(obj.amounts)) {
+      total += aggregateAmounts(obj.amounts);
+    }
+    const candidateKeys = ['total', 'userPaid', 'subsidyUsed', 'actualCost', 'setsAmount', 'boost', 'boostAmount'];
+    for (const key of candidateKeys) {
+      if (key in obj) {
+        total += aggregateAmounts(obj[key]);
+      }
+    }
+    return total;
+  }
+  return 0n;
+}
+
+function rangeCutoff(range: LeaderboardRange | string): number {
+  return cutoff(range);
 }
 
 export type LeaderboardBucket = "total" | "creator" | "booster" | "trader" | "eff";
-export type LeaderboardRange = "24h" | "7d" | "14d";
+export type LeaderboardRange = "24h" | "7d" | "14d" | "30d" | "ytd" | "all";
 
 export type LeaderboardRow = {
   addr: string;
@@ -116,8 +144,7 @@ export type LeaderboardRow = {
 
 export function getLeaderboard(range: LeaderboardRange, bucket: LeaderboardBucket): LeaderboardRow[] {
   const db = getDatabase();
-  const now = Math.floor(Date.now() / 1000);
-  const cutoff = now - rangeToSeconds(range);
+  const cutoff = rangeCutoff(range);
 
   const rewardRows = db
     .prepare(
@@ -311,8 +338,7 @@ export type RewardSplit = {
 export function getMySummary(range: LeaderboardRange): RewardSplit[] {
   if (!ME_ADDRESS) return [];
   const db = getDatabase();
-  const now = Math.floor(Date.now() / 1000);
-  const cutoff = now - rangeToSeconds(range);
+  const cutoff = rangeCutoff(range);
 
   const rewardRow = db
     .prepare(
@@ -333,12 +359,24 @@ export function getMySummary(range: LeaderboardRange): RewardSplit[] {
   const totalReward = microsToNumber(rewardRow?.reward ?? 0);
   const totalStake = microsToNumber(stakeRow?.stake ?? 0);
 
-  return [
-    { bucket: "TOTAL", reward: totalReward, stake: totalStake },
-    { bucket: "CREATOR", reward: 0, stake: 0 },
-    { bucket: "BOOSTER", reward: 0, stake: 0 },
-    { bucket: "TRADER", reward: totalReward, stake: totalStake }
-  ];
+  const bucketRows = db
+    .prepare(
+      `SELECT kind, SUM(CAST(amount AS INTEGER)) AS reward
+       FROM rewards
+       WHERE user = ? AND kind IN ('creator', 'booster', 'trader') AND ts >= ?
+       GROUP BY kind`
+    )
+    .all(ME_ADDRESS, cutoff) as { kind: string; reward: number | null }[];
+
+  const splits: RewardSplit[] = [{ bucket: 'TOTAL', reward: totalReward, stake: totalStake }];
+
+  for (const row of bucketRows) {
+    const key = row.kind.toUpperCase();
+    const reward = microsToNumber(row.reward ?? 0);
+    splits.push({ bucket: key, reward, stake: 0 });
+  }
+
+  return splits;
 }
 
 export type KPI = {
@@ -503,8 +541,7 @@ export type PnlRow = {
 
 export function getPnl(range: LeaderboardRange, limit = 50): PnlRow[] {
   const db = getDatabase();
-  const now = Math.floor(Date.now() / 1000);
-  const cutoff = now - rangeToSeconds(range);
+  const cutoff = rangeCutoff(range);
 
   const rewardRows = db
     .prepare(
@@ -577,7 +614,10 @@ function interpretMetadata(metadata?: string | null): MetadataInfo {
   let decoded = metadata;
   if (metadata.startsWith("0x")) {
     try {
-      decoded = Buffer.from(metadata.slice(2), "hex").toString("utf8");
+      const raw = Buffer.from(metadata.slice(2), "hex");
+      const isGzip = raw.length > 2 && raw[0] === 0x1f && raw[1] === 0x8b;
+      const buffer = isGzip ? gunzipSync(raw) : raw;
+      decoded = buffer.toString("utf8");
     } catch (error) {
       decoded = metadata;
     }

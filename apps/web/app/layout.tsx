@@ -11,8 +11,8 @@ export default function RootLayout({
   children
 }: Readonly<{ children: React.ReactNode }>) {
   return (
-    <html lang="en">
-      <body>
+    <html lang="en" data-theme="dark">
+      <body className="bg-bg text-text font-sans">
         <DebugProbe />
         <div id="bk-root" className="bk-min-h-screen">
           {children}

@@ -1,5 +1,5 @@
 import { JsonRpcProvider, Interface, Log, getAddress } from "ethers";
-import { predictionMarketAbi, vaultAbi } from "./abi.js";
+import { predictionMarketAbi, vaultAbi, rewardDistributorAbi } from "./abi.js";
 import {
   insertLockEvent,
   insertMarket,
@@ -7,15 +7,19 @@ import {
   insertResolution,
   insertRedemption,
   insertTrade,
+  insertRewardEvent,
   insertRewardClaim,
-  insertMarketStub,
-  marketExists
+  insertStakeEvent,
+  insertSponsoredLock,
+  marketExists,
+  getActiveMarketIds
 } from "./db.js";
 import { resolveAndStoreProfiles } from "./contextProfiles.js";
 import { env } from "./env.js";
 
 const marketInterface = new Interface(predictionMarketAbi as any);
 const vaultInterface = new Interface(vaultAbi as any);
+const rewardDistributorInterface = new Interface(rewardDistributorAbi as any);
 const erc20Interface = new Interface([
   "event Transfer(address indexed from, address indexed to, uint256 value)"
 ]);
@@ -25,8 +29,26 @@ export const TRANSFER_TOPIC = erc20Interface.getEvent("Transfer")!.topicHash;
 const profileQueue = new Set<string>();
 const pendingMarketState = new Map<string, number>();
 const blockTimestampCache = new Map<number, number>();
+const inflightBlockFetches = new Map<number, Promise<number>>();
+const snapshotLastSeen = new Map<string, number>();
+const BLOCK_RPC_CONCURRENCY = Math.max(1, Number(process.env.BLOCK_RPC_CONCURRENCY ?? '2'));
+const SNAPSHOT_DEBOUNCE_SECONDS = Math.max(0, Number(process.env.MARKET_SNAPSHOT_DEBOUNCE_SECONDS ?? '120'));
+const SHOULD_SCRAPE_PROFILES = (process.env.PROFILE_SCRAPE ?? 'true').toLowerCase() !== 'false';
+let activeBlockRequests = 0;
+const blockRequestQueue: Array<() => void> = [];
 const ZERO_HEX_32 = "0x0000000000000000000000000000000000000000000000000000000000000000";
 const ZERO_TX_HASH = ZERO_HEX_32;
+
+function normalizeEpochId(value: any): string {
+  if (value === undefined || value === null) return "";
+  const raw = value?.toString?.() ?? String(value);
+  if (!raw) return "";
+  try {
+    return BigInt(raw).toString();
+  } catch (error) {
+    return raw;
+  }
+}
 
 function normalizeHex(value: any): `0x${string}` | undefined {
   if (value === undefined || value === null) return undefined;
@@ -46,14 +68,104 @@ function normalizeTxHash(value: any): string {
   return normalizeHex(value) ?? ZERO_TX_HASH;
 }
 
-function ensureMarketPresent(marketId: string, ts: number) {
-  if (!marketExists(marketId)) {
-    insertMarketStub(marketId, ts);
+function toAmountString(value: any): string | null {
+  if (value === undefined || value === null) return null;
+  const raw = value?.toString?.() ?? String(value);
+  if (!raw) return null;
+  try {
+    return BigInt(raw).toString();
+  } catch (error) {
+    return raw;
+  }
+}
+
+function sumAmounts(values: string[]): bigint {
+  return values.reduce<bigint>((acc, entry) => {
+    try {
+      return acc + BigInt(entry);
+    } catch (error) {
+      return acc;
+    }
+  }, 0n);
+}
+
+function markMarketSnapshot(marketId: string, ts: number, force = false) {
+  if (!force && SNAPSHOT_DEBOUNCE_SECONDS > 0) {
+    const last = snapshotLastSeen.get(marketId) ?? 0;
+    if (ts <= last + SNAPSHOT_DEBOUNCE_SECONDS) {
+      return;
+    }
   }
   pendingMarketState.set(marketId, ts);
 }
 
+function ensureMarketPresent(marketId: string, ts: number): boolean {
+  if (!marketExists(marketId)) {
+    return false;
+  }
+  markMarketSnapshot(marketId, ts);
+  return true;
+}
+
+function scheduleBlockFetch<T>(fn: () => Promise<T>): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const run = () => {
+      activeBlockRequests++;
+      fn()
+        .then(resolve)
+        .catch(reject)
+        .finally(() => {
+          activeBlockRequests--;
+          const next = blockRequestQueue.shift();
+          if (next) next();
+        });
+    };
+
+    if (activeBlockRequests < BLOCK_RPC_CONCURRENCY) {
+      run();
+    } else {
+      blockRequestQueue.push(run);
+    }
+  });
+}
+
+function isRateLimitError(error: any): boolean {
+  const message = String(error?.message ?? error ?? '').toLowerCase();
+  const code = error?.code ?? error?.error?.code;
+  return code === -32016 || message.includes('rate') || message.includes('limit');
+}
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function fetchBlockTimestamp(provider: JsonRpcProvider, blockNumber: number): Promise<number> {
+  let delay = 250;
+  for (let attempt = 0; attempt < 6; attempt++) {
+    try {
+      const block = await provider.getBlock(blockNumber);
+      if (!block) {
+        throw new Error(`block ${blockNumber} not found`);
+      }
+      const ts = Number(block.timestamp ?? 0);
+      if (!Number.isFinite(ts) || ts <= 0) {
+        throw new Error(`invalid timestamp for block ${blockNumber}`);
+      }
+      return ts;
+    } catch (error) {
+      if (isRateLimitError(error)) {
+        await sleep(delay);
+        delay = Math.min(delay * 2, 8000);
+        continue;
+      }
+      throw error;
+    }
+  }
+  throw new Error(`getBlock rate-limited too long at ${blockNumber}`);
+}
+
 function enqueueProfile(addr: string | undefined) {
+  if (!SHOULD_SCRAPE_PROFILES) return;
   if (!addr) return;
   try {
     const normalized = getAddress(addr);
@@ -67,13 +179,21 @@ async function blockTimestamp(provider: JsonRpcProvider, blockNumber: number): P
   if (blockTimestampCache.has(blockNumber)) {
     return blockTimestampCache.get(blockNumber)!;
   }
-  const block = await provider.getBlock(blockNumber);
-  const ts = Number(block?.timestamp ?? Math.floor(Date.now() / 1000));
-  blockTimestampCache.set(blockNumber, ts);
-  if (blockTimestampCache.size > 512) {
-    blockTimestampCache.clear();
+  let task = inflightBlockFetches.get(blockNumber);
+  if (!task) {
+    task = scheduleBlockFetch(() => fetchBlockTimestamp(provider, blockNumber));
+    inflightBlockFetches.set(blockNumber, task);
   }
-  return ts;
+  try {
+    const ts = await task;
+    blockTimestampCache.set(blockNumber, ts);
+    if (blockTimestampCache.size > 2048) {
+      blockTimestampCache.clear();
+    }
+    return ts;
+  } finally {
+    inflightBlockFetches.delete(blockNumber);
+  }
 }
 
 function toLower(value: string | undefined | null): string | undefined {
@@ -95,6 +215,8 @@ export async function handleMarketLog(provider: JsonRpcProvider, log: Log) {
   const ts = await blockTimestamp(provider, blockNum);
 
   const marketId = normalizeHex(parsed?.args?.marketId);
+  const txHash = normalizeTxHash(log.transactionHash);
+  const logIndex = Number((log as any).logIndex ?? (log as any).index ?? 0);
 
   switch (eventName) {
     case "MarketCreated": {
@@ -138,8 +260,10 @@ export async function handleMarketLog(provider: JsonRpcProvider, log: Log) {
       const usdcOut = usdcFlow < 0n ? -usdcFlow : 0n;
       insertTrade({
         ts,
+        blockNumber: blockNum,
         marketId,
-        txHash: normalizeTxHash(log.transactionHash),
+        txHash,
+        logIndex,
         trader,
         usdcIn,
         usdcOut
@@ -171,16 +295,13 @@ export async function handleMarketLog(provider: JsonRpcProvider, log: Log) {
         token,
         shares,
         payout,
-        txHash: normalizeTxHash(log.transactionHash),
-        logIndex: Number((log as any).logIndex ?? (log as any).index ?? 0)
+        txHash,
+        logIndex
       });
       enqueueProfile(redeemer);
       break;
     }
     default:
-      if (marketId) {
-        ensureMarketPresent(marketId, ts);
-      }
       break;
   }
 }
@@ -202,40 +323,67 @@ export async function handleVaultLog(provider: JsonRpcProvider, log: Log) {
   const marketId = normalizeHex(parsed?.args?.marketId);
   const user = toLower(parsed?.args?.locker ?? parsed?.args?.staker ?? parsed?.args?.user);
   enqueueProfile(user);
+  const txHash = normalizeTxHash(log.transactionHash);
+  const logIndex = Number((log as any).logIndex ?? (log as any).index ?? 0);
 
   switch (eventName) {
     case "LockUpdated":
-    case "Unlocked":
+    case "Unlocked": {
+      if (!marketId || !user) break;
+      ensureMarketPresent(marketId, ts);
+      const amountsRaw = Array.isArray(parsed?.args?.amounts) ? parsed.args.amounts : [];
+      const amounts = amountsRaw.map((v: any) => toAmountString(v) ?? '0');
+      const total = sumAmounts(amounts);
+      const kind = eventName === "Unlocked" ? "unlock" : "lock";
+      insertLockEvent({
+        txHash,
+        logIndex,
+        marketId,
+        locker: user,
+        kind,
+        amounts,
+        blockNumber: blockNum,
+        ts,
+        payload: { amounts, total: total.toString(), event: eventName }
+      });
+      break;
+    }
     case "StakeUpdated": {
       if (!marketId || !user) break;
       ensureMarketPresent(marketId, ts);
       const amountsRaw = Array.isArray(parsed?.args?.amounts) ? parsed.args.amounts : [];
-      const amounts = amountsRaw.map((v: any) => v?.toString?.() ?? String(v ?? 0));
-      insertLockEvent({
-        ts,
+      const amounts = amountsRaw.map((v: any) => toAmountString(v) ?? '0');
+      insertStakeEvent({
+        txHash,
+        logIndex,
         marketId,
-        user,
-        type: eventName.toLowerCase().replace("updated", ""),
-        payload: { amounts }
+        staker: user,
+        amounts,
+        blockNumber: blockNum,
+        ts
       });
       break;
     }
     case "SponsoredLocked": {
       if (!marketId || !user) break;
       ensureMarketPresent(marketId, ts);
-      insertLockEvent({
-        ts,
+      const setsAmount = toAmountString(parsed?.args?.setsAmount);
+      const userPaid = toAmountString(parsed?.args?.userPaid);
+      const subsidyUsed = toAmountString(parsed?.args?.subsidyUsed);
+      const actualCost = toAmountString(parsed?.args?.actualCost);
+      insertSponsoredLock({
+        txHash,
+        logIndex,
         marketId,
         user,
-        type: "sponsored",
-        payload: {
-          setsAmount: parsed?.args?.setsAmount ? String(parsed.args.setsAmount) : null,
-          userPaid: parsed?.args?.userPaid ? String(parsed.args.userPaid) : null,
-          subsidyUsed: parsed?.args?.subsidyUsed ? String(parsed.args.subsidyUsed) : null,
-          actualCost: parsed?.args?.actualCost ? String(parsed.args.actualCost) : null,
-          outcomes: parsed?.args?.outcomes ? Number(parsed.args.outcomes) : null,
-          nonce: parsed?.args?.nonce ? String(parsed.args.nonce) : null
-        }
+        setsAmount,
+        userPaid,
+        subsidyUsed,
+        actualCost,
+        outcomes: parsed?.args?.outcomes ? Number(parsed.args.outcomes) : null,
+        nonce: parsed?.args?.nonce ? String(parsed.args.nonce) : null,
+        blockNumber: blockNum,
+        ts
       });
       break;
     }
@@ -268,6 +416,48 @@ export async function handleRewardTransferLog(provider: JsonRpcProvider, log: Lo
     amount
   });
   enqueueProfile(toAddr);
+}
+
+export async function handleRewardDistributorLog(provider: JsonRpcProvider, log: Log) {
+  let parsed: any;
+  try {
+    parsed = rewardDistributorInterface.parseLog(log as any);
+  } catch (error) {
+    return;
+  }
+
+  const eventName = parsed?.name ?? parsed?.fragment?.name;
+  if (!eventName) return;
+
+  const blockNum = typeof log.blockNumber === "number" ? log.blockNumber : Number(log.blockNumber ?? 0);
+  const ts = await blockTimestamp(provider, blockNum);
+  const epochIdRaw = parsed?.args?.epochId ?? parsed?.args?.epochID;
+  const epochId = normalizeEpochId(epochIdRaw);
+
+  switch (eventName) {
+    case "EpochRootSet": {
+      const root = parsed?.args?.merkleRoot ? String(parsed.args.merkleRoot) : null;
+      insertRewardEvent({ ts, kind: "root", epochId, root });
+      break;
+    }
+    case "RewardClaimed": {
+      const user = toLower(parsed?.args?.user);
+      if (!user) break;
+      const amount = BigInt(parsed?.args?.amount?.toString?.() ?? parsed?.args?.amount ?? 0n);
+      insertRewardEvent({ ts, kind: "claim", epochId, user, amount });
+      insertRewardClaim({
+        txHash: normalizeTxHash(log.transactionHash),
+        logIndex: Number((log as any).logIndex ?? (log as any).index ?? 0),
+        ts,
+        user,
+        amount
+      });
+      enqueueProfile(user);
+      break;
+    }
+    default:
+      break;
+  }
 }
 
 export async function flushProfiles() {
@@ -303,6 +493,7 @@ async function updateMarketState(provider: JsonRpcProvider, marketId: string, ts
     }, 0n);
 
     insertMarketState({ marketId, ts, totalUsdc, totalQ, alpha });
+    snapshotLastSeen.set(marketId, ts);
   } catch (error) {
     console.warn("market state refresh failed", marketId, error);
   }
@@ -314,5 +505,13 @@ export async function flushPendingMarketStates(provider: JsonRpcProvider) {
   pendingMarketState.clear();
   for (const [marketId, ts] of entries) {
     await updateMarketState(provider, marketId, ts);
+  }
+}
+
+export async function queueResnapshotForActiveMarkets(ts?: number) {
+  const at = ts ?? Math.floor(Date.now() / 1000);
+  const marketIds = getActiveMarketIds();
+  for (const marketId of marketIds) {
+    markMarketSnapshot(marketId, at, true);
   }
 }

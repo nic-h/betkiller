@@ -1,7 +1,8 @@
 import { createPublicClient, http } from 'viem';
 import { base } from 'viem/chains';
+import { env } from './env.js';
 
-const client = createPublicClient({ chain: base, transport: http(process.env.BASE_RPC_URL!) });
+const client = createPublicClient({ chain: base, transport: http(env.baseRpc) });
 
 export async function findBlockAt(timestampSec: number): Promise<bigint> {
   const latest = await client.getBlock();
