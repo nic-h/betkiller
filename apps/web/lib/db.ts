@@ -87,6 +87,43 @@ function sumPayloadAmounts(payloadJson: string): bigint {
   }
 }
 
+function parseSponsoredAmount(payloadJson: string | null): bigint {
+  if (!payloadJson) return 0n;
+  try {
+    const parsed = JSON.parse(payloadJson);
+    if (parsed?.actualCost != null) {
+      return BigInt(String(parsed.actualCost));
+    }
+    let total = 0n;
+    if (parsed?.userPaid != null) {
+      total += BigInt(String(parsed.userPaid));
+    }
+    if (parsed?.subsidyUsed != null) {
+      total += BigInt(String(parsed.subsidyUsed));
+    }
+    return total;
+  } catch (error) {
+    return 0n;
+  }
+}
+
+function parseUnlockedAmount(payloadJson: string | null): bigint {
+  if (!payloadJson) return 0n;
+  try {
+    const parsed = JSON.parse(payloadJson);
+    const amounts = Array.isArray(parsed?.amounts) ? parsed.amounts : [];
+    return amounts.reduce((total: bigint, value: unknown) => {
+      try {
+        return total + BigInt(String(value));
+      } catch (error) {
+        return total;
+      }
+    }, 0n);
+  } catch (error) {
+    return 0n;
+  }
+}
+
 function aggregateAmounts(value: unknown): bigint {
   if (value === null || value === undefined) return 0n;
   if (typeof value === 'bigint') return value;
@@ -248,12 +285,12 @@ export function getLiveSlate(): SlateItem[] {
     )
     .all(cutoff24h) as { marketId: string; volume: number | null; traders: number | null }[];
 
-  const boostRows = db
+  const lockRows = db
     .prepare(
-      `SELECT marketId, payloadJson
+      `SELECT marketId, type, payloadJson
        FROM locks`
     )
-    .all() as { marketId: string; payloadJson: string }[];
+    .all() as { marketId: string; type: string | null; payloadJson: string | null }[];
 
   const stateRows = db
     .prepare(
@@ -271,10 +308,20 @@ export function getLiveSlate(): SlateItem[] {
     });
   }
 
-  const boostMap = new Map<string, bigint>();
-  for (const row of boostRows) {
-    const prev = boostMap.get(row.marketId) ?? 0n;
-    boostMap.set(row.marketId, prev + sumPayloadAmounts(row.payloadJson));
+  const boostMap = new Map<string, { sponsored: bigint; unlocked: bigint }>();
+  for (const row of lockRows) {
+    const marketId = row.marketId;
+    if (!marketId) continue;
+    const entry = boostMap.get(marketId) ?? { sponsored: 0n, unlocked: 0n };
+    const kind = (row.type ?? "").toLowerCase();
+    if (kind === "sponsored") {
+      const amount = parseSponsoredAmount(row.payloadJson);
+      entry.sponsored += amount;
+    } else if (kind === "unlock" || kind === "unlocked") {
+      const amount = parseUnlockedAmount(row.payloadJson);
+      entry.unlocked += amount;
+    }
+    boostMap.set(marketId, entry);
   }
 
   const tvlMap = new Map<string, { totalUsdc: number; totalQ: number }>();
@@ -290,7 +337,9 @@ export function getLiveSlate(): SlateItem[] {
       const meta = interpretMetadata(market.metadata);
       const title = meta.title ?? market.marketId;
       const volumeInfo = volumeMap.get(market.marketId) ?? { volume: 0, traders: 0 };
-      const boostTotal = Number(boostMap.get(market.marketId) ?? 0n) / 1_000_000;
+      const boostEntry = boostMap.get(market.marketId) ?? { sponsored: 0n, unlocked: 0n };
+      const outstanding = boostEntry.sponsored > boostEntry.unlocked ? boostEntry.sponsored - boostEntry.unlocked : 0n;
+      const boostTotal = Number(outstanding) / 1_000_000;
       const volume24h = (volumeInfo.volume ?? 0) / 1_000_000;
       const uniqueTraders24h = volumeInfo.traders ?? 0;
       const fallbackCutoff = (market.createdAt ?? now) + 72 * 3600;
