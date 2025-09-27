@@ -14,7 +14,7 @@ export function NearResolutionList({ initial }: { initial: NearResolutionItem[] 
         fetch("/api/near-resolution")
           .then((res) => res.json())
           .then((data) => {
-            if (Array.isArray(data?.items)) setItems(data.items as NearResolutionItem[]);
+            if (Array.isArray(data?.rows)) setItems(data.rows as NearResolutionItem[]);
           })
           .catch(() => {});
       });

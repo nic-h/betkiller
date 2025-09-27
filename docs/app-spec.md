@@ -28,6 +28,7 @@ The system maintains a rolling 14-day history by default (`LOOKBACK_DAYS`).
 - `locks` – vault interactions (+ payload for boosts).
 - `rewards` – reward claims and buckets.
 - `impact` – cost-to-move precomputations.
+- `processed_logs` – contract/log dedupe ledger (`contract` + `txHash` + `logIndex`).
 - `market_state` – TVL snapshots per market over time.
 - `profiles` – `address`, `display_name`, `x_handle`, `last_seen`.
 
@@ -68,6 +69,15 @@ Each endpoint reads from SQLite using prepared statements in `apps/web/lib/db.ts
 | `PROFILE_CONCURRENCY` | Parallel profile fetches |
 | `RPC_MAX_ATTEMPTS` | Max RPC retries |
 | `RPC_RETRY_DELAY_MS` | Initial retry delay (exponential) |
+| `RPC_URLS` | Comma-separated Base RPC endpoints for the indexer pool |
+| `RPC_QPS` | Target aggregate requests per second across RPC URLs |
+| `RPC_MAX_RETRIES` | Max attempts before surfacing an RPC failure |
+| `RPC_TIMEOUT_MS` | Deadline per RPC call before retrying |
+| `LOG_INIT_SPAN` | Initial block span for adaptive log scanning |
+| `LOG_MAX_SPAN` | Ceiling block span when log fetches succeed |
+| `LOG_MIN_SPAN` | Floor block span when providers cap results |
+| `REALTIME_HANDOFF_DEPTH` | Blocks to leave for realtime watcher handoff (default 2) |
+| `BLOCK_POLL_INTERVAL` | Milliseconds between block watcher polls (default 4000) |
 
 ### Dashboard (`apps/web/.env.local`)
 

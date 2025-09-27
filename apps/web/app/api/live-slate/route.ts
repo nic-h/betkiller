@@ -3,8 +3,8 @@ import { getLiveSlate } from "@/lib/db";
 
 export async function GET() {
   try {
-    const items = getLiveSlate();
-    return NextResponse.json({ items });
+    const rows = getLiveSlate();
+    return NextResponse.json({ rows });
   } catch (error) {
     return NextResponse.json({ error: "failed_to_fetch" }, { status: 500 });
   }

@@ -25,6 +25,7 @@ app:
     market_state: {fields: [marketId, ts, totalUsdc, totalQ, alpha]}
     profiles: {fields: [address, display_name, x_handle, last_seen]}
     impact: {fields: [marketId, usdcClip, deltaProb, ts]}
+    processed_logs: {fields: [contract, txHash, logIndex, blockNumber]}
   apis:
     - path: /api/leaderboard
       params: {range: [24h,7d,14d], by: [total,creator,booster,trader,eff]}
@@ -44,7 +45,7 @@ app:
   env:
     indexer:
       required: [BASE_RPC, LOOKBACK_DAYS, CONTEXT_BASE, PROFILE_SCRAPE]
-      optional: [PROFILE_TTL_SECONDS, PROFILE_CONCURRENCY, RPC_MAX_ATTEMPTS, RPC_RETRY_DELAY_MS]
+      optional: [PROFILE_TTL_SECONDS, PROFILE_CONCURRENCY, RPC_MAX_ATTEMPTS, RPC_RETRY_DELAY_MS, RPC_URLS, RPC_QPS, RPC_MAX_RETRIES, RPC_TIMEOUT_MS, LOG_INIT_SPAN, LOG_MAX_SPAN, LOG_MIN_SPAN, REALTIME_HANDOFF_DEPTH, BLOCK_POLL_INTERVAL]
     web:
       required: [BK_DB]
       optional: [BK_ME, NEXT_PUBLIC_BASE_URL]

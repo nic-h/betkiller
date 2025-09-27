@@ -4,9 +4,9 @@ import type { RewardSplit } from "@/lib/db";
 import { formatMoney } from "@/lib/fmt";
 
 const COLORS: Record<string, string> = {
-  CREATOR: "bk-bg-brand-blue/80",
-  BOOSTER: "bk-bg-brand-orange/70",
-  TRADER: "bk-bg-emerald-400/70",
+  CREATOR: "bk-bg-brand-orange/70",
+  BOOSTER: "bk-bg-brand-blue/80",
+  TRADER: "bk-bg-brand-ring",
   TOTAL: "bk-bg-brand-blue/50"
 };
 

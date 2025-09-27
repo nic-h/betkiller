@@ -14,7 +14,7 @@ export function LiveSlate({ initial }: { initial: SlateEntry[] }) {
         fetch("/api/live-slate")
           .then((res) => res.json())
           .then((data) => {
-            if (Array.isArray(data?.items)) setEntries(data.items as SlateEntry[]);
+            if (Array.isArray(data?.rows)) setEntries(data.rows as SlateEntry[]);
           })
           .catch(() => {});
       });

@@ -3,8 +3,10 @@ import { Buffer } from "buffer";
 import fs from "fs";
 import path from "path";
 
-const DB_PATH = process.env.BK_DB ?? process.env.DATABASE_PATH ?? "../../data/context-edge.db";
+const DB_PATH =
+  process.env.SQLITE_PATH ?? process.env.BK_DB ?? process.env.DATABASE_PATH ?? "../../data/context-edge.db";
 const ME_ADDRESS = process.env.BK_ME?.toLowerCase() ?? null;
+
 
 let singleton: BetterSqliteDatabase | null = null;
 
@@ -24,6 +26,34 @@ export function getDatabase(): BetterSqliteDatabase {
   }
   singleton = new Database(dbPath, { readonly: true, fileMustExist: true });
   return singleton;
+}
+
+export function db(): BetterSqliteDatabase {
+  return getDatabase();
+}
+
+export function hasTable(name: string): boolean {
+  const row = db()
+    .prepare("SELECT 1 FROM sqlite_master WHERE type IN ('table','view') AND name = ? LIMIT 1")
+    .get(name);
+  return !!row;
+}
+
+export function cutoff(range?: string): number {
+  const now = Math.floor(Date.now() / 1000);
+  const day = 24 * 60 * 60;
+  switch (range) {
+    case "24h":
+      return now - day;
+    case "7d":
+      return now - 7 * day;
+    case "30d":
+      return now - 30 * day;
+    case "14d":
+      return now - 14 * day;
+    default:
+      return 0;
+  }
 }
 
 function microsToNumber(value: unknown): number {
@@ -230,12 +260,15 @@ export function getLiveSlate(): SlateItem[] {
 
   return markets
     .map((market) => {
-      const title = deriveTitle(market.metadata) ?? market.marketId;
+      const meta = interpretMetadata(market.metadata);
+      const title = meta.title ?? market.marketId;
       const volumeInfo = volumeMap.get(market.marketId) ?? { volume: 0, traders: 0 };
       const boostTotal = Number(boostMap.get(market.marketId) ?? 0n) / 1_000_000;
       const volume24h = (volumeInfo.volume ?? 0) / 1_000_000;
       const uniqueTraders24h = volumeInfo.traders ?? 0;
-      const cutoffTs = (market.createdAt ?? now) + 72 * 3600;
+      const fallbackCutoff = (market.createdAt ?? now) + 72 * 3600;
+      const cutoffCandidate = meta.cutoffTs ?? null;
+      const cutoffTs = cutoffCandidate && cutoffCandidate > 0 ? cutoffCandidate : fallbackCutoff;
       const edgeScore = (boostTotal * 0.4 + volume24h * 0.4 + uniqueTraders24h * 0.2) * ((cutoffTs - now >= 3600 && cutoffTs - now <= 7 * 86400) ? 1 : 0.6);
       const state = tvlMap.get(market.marketId) ?? { totalUsdc: 0, totalQ: 0 };
       return {
@@ -347,12 +380,22 @@ export function getKpis(): KPI[] {
   const rewardsToday = pnlToday;
   const openRisk = boostRow.reduce((acc, row) => acc + Number(sumPayloadAmounts(row.payloadJson)) / 1_000_000, 0);
 
-  return [
-    { label: "Bankroll", value: bankroll },
-    { label: "PnL (24h)", value: pnlToday },
-    { label: "Rewards (24h)", value: rewardsToday },
+  const out: KPI[] = [
+    { label: "Global Bankroll", value: bankroll },
+    { label: "Global PnL (24h)", value: pnlToday },
+    { label: "Global Rewards (24h)", value: rewardsToday },
     { label: "Open Risk", value: openRisk }
   ];
+
+  if (ME_ADDRESS) {
+    const mySummary = getMySummary("24h");
+    const total = mySummary.find((entry) => entry.bucket === "TOTAL");
+    if (total) {
+      out.push({ label: "My Rewards (24h)", value: total.reward });
+    }
+  }
+
+  return out;
 }
 
 export type CompetitorEntry = {
@@ -522,19 +565,238 @@ export function getPnl(range: LeaderboardRange, limit = 50): PnlRow[] {
     .slice(0, limit);
 }
 
-function deriveTitle(metadata?: string | null): string | null {
-  if (!metadata) return null;
+type MetadataInfo = {
+  title?: string;
+  cutoffTs?: number;
+  raw?: string;
+};
+
+function interpretMetadata(metadata?: string | null): MetadataInfo {
+  if (!metadata) return {};
+
+  let decoded = metadata;
   if (metadata.startsWith("0x")) {
     try {
-      const hex = metadata.slice(2);
-      const bytes = Buffer.from(hex, "hex");
-      const decoded = bytes.toString("utf8");
-      if (decoded && decoded.trim().length > 0) return decoded.trim();
+      decoded = Buffer.from(metadata.slice(2), "hex").toString("utf8");
     } catch (error) {
-      return null;
+      decoded = metadata;
     }
   }
-  return metadata;
+
+  const trimmed = decoded?.trim() ?? "";
+  const info: MetadataInfo = {};
+  if (trimmed) {
+    info.raw = trimmed;
+  }
+
+  if (!trimmed) {
+    return info;
+  }
+
+  if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+    try {
+      const parsed = JSON.parse(trimmed);
+      const title = resolveTitleFromMeta(parsed);
+      if (title) info.title = title;
+      const cutoff = resolveCutoffFromMeta(parsed);
+      if (cutoff) info.cutoffTs = cutoff;
+      if (!info.title && typeof parsed === "string" && parsed.trim().length > 0) {
+        info.title = parsed.trim();
+      }
+    } catch (error) {
+      // fall back to text parsing
+    }
+  }
+
+  if (!info.cutoffTs) {
+    const ts = extractTimestampFromText(trimmed);
+    if (ts) info.cutoffTs = ts;
+  }
+
+  if (!info.title && trimmed) {
+    info.title = trimmed;
+  }
+
+  return info;
+}
+
+function deriveTitle(metadata?: string | null): string | null {
+  const info = interpretMetadata(metadata);
+  return info.title ?? info.raw ?? null;
+}
+
+const TITLE_KEYS = ["title", "question", "name", "prompt", "headline", "summary"];
+const TIME_KEYS = [
+  "close",
+  "closetime",
+  "close_time",
+  "deadline",
+  "resolve",
+  "resolvetime",
+  "resolutiontime",
+  "resolution_time",
+  "resolutionts",
+  "resolveat",
+  "resolve_at",
+  "end",
+  "endtime",
+  "expiry",
+  "expiration",
+  "expire",
+  "settle",
+  "settlement",
+  "cutoff",
+  "cutoffts"
+];
+
+function resolveTitleFromMeta(value: unknown): string | undefined {
+  return extractTitleFromMeta(value, new Set());
+}
+
+function extractTitleFromMeta(value: unknown, seen: Set<unknown>): string | undefined {
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    return trimmed.length > 0 ? trimmed : undefined;
+  }
+  if (!value || typeof value !== "object") return undefined;
+  if (seen.has(value)) return undefined;
+  seen.add(value);
+
+  if (Array.isArray(value)) {
+    for (const entry of value) {
+      const match = extractTitleFromMeta(entry, seen);
+      if (match) return match;
+    }
+    return undefined;
+  }
+
+  const obj = value as Record<string, unknown>;
+  for (const key of Object.keys(obj)) {
+    const lower = key.toLowerCase();
+    if (TITLE_KEYS.includes(lower)) {
+      const candidate = obj[key];
+      if (typeof candidate === "string" && candidate.trim().length > 0) {
+        return candidate.trim();
+      }
+    }
+  }
+
+  for (const key of Object.keys(obj)) {
+    const nested = extractTitleFromMeta(obj[key], seen);
+    if (nested) return nested;
+  }
+
+  return undefined;
+}
+
+function resolveCutoffFromMeta(value: unknown): number | undefined {
+  return extractCutoffFromMeta(value, new Set());
+}
+
+function extractCutoffFromMeta(value: unknown, seen: Set<unknown>): number | undefined {
+  if (typeof value === "number") {
+    return normalizeTimestamp(value);
+  }
+  if (typeof value === "string") {
+    return parseTimeString(value);
+  }
+  if (!value || typeof value !== "object") {
+    return undefined;
+  }
+  if (seen.has(value)) return undefined;
+  seen.add(value);
+
+  if (Array.isArray(value)) {
+    for (const entry of value) {
+      const ts = extractCutoffFromMeta(entry, seen);
+      if (ts) return ts;
+    }
+    return undefined;
+  }
+
+  const obj = value as Record<string, unknown>;
+
+  if (typeof obj.seconds === "number") {
+    const ts = normalizeTimestamp(obj.seconds);
+    if (ts) return ts;
+  }
+  if (typeof obj.timestamp === "number") {
+    const ts = normalizeTimestamp(obj.timestamp);
+    if (ts) return ts;
+  }
+  if (typeof obj.timestamp === "string") {
+    const ts = parseTimeString(obj.timestamp);
+    if (ts) return ts;
+  }
+
+  for (const key of Object.keys(obj)) {
+    const lower = key.toLowerCase();
+    if (TIME_KEYS.includes(lower)) {
+      const ts = extractCutoffFromMeta(obj[key], seen);
+      if (ts) return ts;
+    }
+  }
+
+  for (const key of Object.keys(obj)) {
+    const ts = extractCutoffFromMeta(obj[key], seen);
+    if (ts) return ts;
+  }
+
+  return undefined;
+}
+
+function parseTimeString(value: string): number | undefined {
+  const trimmed = value.trim();
+  if (!trimmed) return undefined;
+  if (/^\d+$/.test(trimmed)) {
+    return normalizeTimestamp(Number(trimmed));
+  }
+  const isoLike = trimmed.includes(" ") && !trimmed.includes("T") ? trimmed.replace(" ", "T") : trimmed;
+  const parsed = Date.parse(isoLike);
+  if (!Number.isNaN(parsed)) {
+    return Math.floor(parsed / 1000);
+  }
+  return undefined;
+}
+
+function normalizeTimestamp(value: number): number | undefined {
+  if (!Number.isFinite(value) || value <= 0) return undefined;
+  if (value > 10_000_000_000) {
+    return Math.floor(value / 1000);
+  }
+  if (value >= 946684800) { // >= Jan 1 2000
+    return Math.floor(value);
+  }
+  return undefined;
+}
+
+function extractTimestampFromText(text: string): number | undefined {
+  const isoMatch = text.match(/\d{4}-\d{2}-\d{2}[T\s]\d{2}:\d{2}(?::\d{2})?(?:Z|[+-]\d{2}:?\d{2})?/);
+  if (isoMatch) {
+    const candidate = isoMatch[0].includes(" ") && !isoMatch[0].includes("T") ? isoMatch[0].replace(" ", "T") : isoMatch[0];
+    const parsed = Date.parse(candidate);
+    if (!Number.isNaN(parsed)) {
+      return Math.floor(parsed / 1000);
+    }
+  }
+
+  const dateMatch = text.match(/\d{4}-\d{2}-\d{2}/);
+  if (dateMatch) {
+    const parsed = Date.parse(`${dateMatch[0]}T00:00:00Z`);
+    if (!Number.isNaN(parsed)) {
+      return Math.floor(parsed / 1000);
+    }
+  }
+
+  const numericMatches = text.match(/\b\d{10,13}\b/g);
+  if (numericMatches) {
+    for (const candidate of numericMatches) {
+      const ts = normalizeTimestamp(Number(candidate));
+      if (ts) return ts;
+    }
+  }
+
+  return undefined;
 }
 
 function shortenAddress(address: string | null | undefined): string {
