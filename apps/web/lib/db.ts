@@ -5,12 +5,51 @@ import path from "path";
 import { gunzipSync } from "node:zlib";
 
 import { analyzeMarketHeuristics, type MarketHeuristics } from "./heuristics";
-import { normalizeSavedViewQuery, type GlobalSearchResult, type SavedView } from "./savedViews";
 
 const DB_PATH =
   process.env.SQLITE_PATH ?? process.env.BK_DB ?? process.env.DATABASE_PATH ?? "../../data/context-edge.db";
 const ME_ADDRESS = process.env.BK_ME?.toLowerCase() ?? null;
 
+export type GlobalSearchResult = {
+  type: "market" | "wallet";
+  id: string;
+  title: string;
+  subtitle?: string;
+  score: number;
+};
+
+export type SavedView = {
+  id: string;
+  label: string;
+  query?: string;
+  filters?: Record<string, unknown>;
+  createdAt?: number | null;
+  updatedAt?: number | null;
+};
+
+export function normalizeSavedViewQuery(query?: string | null): string {
+  if (!query) return "";
+  const trimmed = query.startsWith("?") ? query.slice(1) : query;
+  if (!trimmed) return "";
+  const params = new URLSearchParams(trimmed);
+  const map = new Map<string, string[]>();
+  for (const [key, value] of params.entries()) {
+    if (!map.has(key)) {
+      map.set(key, []);
+    }
+    map.get(key)!.push(value);
+  }
+  const normalized = new URLSearchParams();
+  const keys = Array.from(map.keys()).sort();
+  for (const key of keys) {
+    const values = map.get(key)!;
+    values.sort();
+    for (const value of values) {
+      normalized.append(key, value);
+    }
+  }
+  return normalized.toString();
+}
 
 let singleton: BetterSqliteDatabase | null = null;
 
@@ -1400,9 +1439,6 @@ export type CompetitorEntry = {
   recentMarketCount: number;
   markets: CompetitorMarketInsight[];
 };
-
-export type { GlobalSearchResult, SavedView } from "./savedViews";
-export { normalizeSavedViewQuery } from "./savedViews";
 
 type IndexerStatus = {
   lastBlock: number;

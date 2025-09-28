@@ -10,11 +10,6 @@ const BUCKETS: { key: LeaderboardBucket; label: string }[] = [
   { key: "eff", label: "Efficiency" }
 ];
 
-const shortenAddress = (value: string): string => {
-  if (!value) return "";
-  return value.length <= 10 ? value : `${value.slice(0, 6)}…${value.slice(-4)}`;
-};
-
 function XIcon({ className }: { className?: string }) {
   return (
     <svg
@@ -178,14 +173,15 @@ function Row({
   pad: string;
   dense: boolean;
 }) {
-  const stickyBg = highlight ? "bk-bg-brand-blue/10" : "bk-bg-brand-panel";
+  const rowIsHighlighted = highlight && !dense;
+  const stickyBg = rowIsHighlighted ? "bk-bg-brand-blue/15" : "bk-bg-brand-panel";
   const handle = row.xHandle;
   const showHandle = Boolean(handle);
   const detailLine = dense
     ? `Markets ${row.marketsTouched} • Last claim ${formatTimeAgo(row.recentRewardTs)}`
     : `Markets ${row.marketsTouched} • Last claim ${formatTimeAgo(row.recentRewardTs)} • Active ${formatTimeAgo(row.lastSeen)}`;
   return (
-    <tr className={highlight ? "bk-bg-brand-blue/10" : "hover:bk-bg-brand-surface/60"}>
+    <tr className={`${rowIsHighlighted ? "bk-bg-brand-blue/10" : ""} hover:bk-bg-brand-surface/60`}>
       <td
         className={`bk-w-12 bk-text-brand-muted ${pad} bk-sticky sm:bk-static bk-left-0 bk-z-10 ${stickyBg}`}
       >

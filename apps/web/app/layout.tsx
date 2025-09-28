@@ -3,7 +3,6 @@ import "../styles/globals.css";
 import { Suspense } from "react";
 import { TopNav } from "@/components/TopNav";
 import { Providers } from "@/components/Providers";
-import { getSavedViews } from "@/lib/db";
 
 export const metadata: Metadata = {
   title: "context.dash",
@@ -13,7 +12,6 @@ export const metadata: Metadata = {
 export default function RootLayout({
   children
 }: Readonly<{ children: React.ReactNode }>) {
-  const savedViews = getSavedViews();
   return (
     <html lang="en">
       <body className="bk-bg-bg bk-text-text bk-font-sans">
@@ -22,7 +20,7 @@ export default function RootLayout({
             <header className="bk-sticky bk-top-0 bk-z-40 bk-bg-brand-bg/80 bk-backdrop-blur bk-border-b bk-border-brand-ring/60">
               <div className="bk-max-w-7xl bk-mx-auto bk-px-6">
                 <Suspense fallback={<div className="bk-h-12" />}> 
-                  <TopNav initialSavedViews={savedViews} />
+                  <TopNav />
                 </Suspense>
               </div>
             </header>

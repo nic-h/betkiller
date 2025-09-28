@@ -176,14 +176,14 @@ apps/web     (Next.js 14 App Router + Tailwind bk- prefix) ─┘
 | Slate UX overhaul | ✅ | Metadata, sparklines, cost-to-move, edge breakdown implemented. |
 | Leaderboard / Competitor analytics | ✅ | Markets touched, last claim/seen, net boosts, overlap, clarity metrics. |
 | Near-res / Resolved rails | ✅ | Countdown + liquidity, payout post-mortems. |
-| Global search + saved-view reader | ✅ | Dropdown + API in place (read-only). |
+| Global search | ✅ | Dropdown search live across traders/markets/activity. |
 | Reward activity list (My Rewards) | ✅ | Displays creator/booster/trader actions + claims. |
 | Indexer freshness KPI | ✅ | Computed via `rewards_last_synced_at`. |
 | Reward claim UX (web) | ✅ | Wagmi-driven Claim/Claim all live with Merkl proofs + provider proxy. |
 | Action queue / liquidity holes | ✅ | Action queue + liquidity-gap module live (mentions-based insights still optional). |
 | Social/mention ingestion (`market_mentions`) | ✅ | Indexer ingests `MENTION_FEED_URL` data into `market_mentions` ready for dashboards. |
 | Market quality heuristics persistence | ✅ | Nightly snapshot job writes `market_heuristics` from metadata heuristics. |
-| Saved views write API | ✅ | POST/PUT/DELETE live with inline UI in top nav. |
+| Saved views write API | ✅ | API exists; UI entry point removed in current iteration. |
 | Risk chips (rule clarity/source parity) in UI | ✅ | Displayed on slate cards with clarity/source/settlement badges. |
 | Wallet exposure explorer & boost ledger UI | ✅ | Exposure table + boost ledger live with API endpoints. |
 
@@ -195,7 +195,6 @@ apps/web     (Next.js 14 App Router + Tailwind bk- prefix) ─┘
 - **Liquidity Holes view:** join spread/depth with mentions velocity + creator reputation, highlight boost ROI calculator.
 - **Rewards panel:** full claim flow with Merkl proofs, “Claim All”, batch awareness.
 - **Risk indicators:** rule clarity meters, source parity badges, settlement risk alerts across slate + resolved cards.
-- **Saved views:** personal filters, quick access, persistence.
 - **Keyboard shortcuts:** (J/K navigation, O open, B boost, T bet) planned but not wired.
 - **Analytics extras:** tweet counts/unique authors, odds movement heatmap, competitor overlap matrices, exposure charts.
 

@@ -24,8 +24,6 @@ import {
   getNearResolution,
   getPnl,
   getResolvedMarkets,
-  getSavedViews,
-  findSavedViewByQuery,
   getActionQueue,
   getLiquidityHoles,
   getWalletExposure,
@@ -59,7 +57,6 @@ export default async function Page({
     events,
     errors,
     resolved,
-    savedViews,
     actionQueue,
     liquidityHoles,
     walletExposure
@@ -74,7 +71,6 @@ export default async function Page({
     Promise.resolve(getEventLog()),
     Promise.resolve(getErrorLog()),
     Promise.resolve(getResolvedMarkets(8)),
-    Promise.resolve(getSavedViews()),
     Promise.resolve(getActionQueue()),
     Promise.resolve(getLiquidityHoles()),
     Promise.resolve(getWalletExposure())
@@ -85,9 +81,6 @@ export default async function Page({
   const spotlightMarkets = liveSlate.slice(0, 3);
   const mySummaryLabel = mySummary.length > 1 ? "Past 14 days by bucket" : "Past 14 days";
 
-  const searchEntries = Object.entries(searchParams ?? {}).filter((entry): entry is [string, string] => typeof entry[1] === "string");
-  const searchString = new URLSearchParams(searchEntries).toString();
-  const activeSavedView = findSavedViewByQuery(searchString, savedViews);
   const defaultExposureAddr = me && walletExposure.some((row) => row.addr === me)
     ? me
     : walletExposure[0]?.addr ?? null;
@@ -95,15 +88,6 @@ export default async function Page({
 
   return (
     <main className="bk-space-y-8">
-      {activeSavedView && (
-        <div className="bk-flex bk-items-center bk-gap-2">
-          <span className="bk-text-2xs bk-text-brand-muted">View</span>
-          <span className="bk-rounded-full bk-bg-brand-blue/20 bk-text-brand-blue bk-px-3 bk-py-1 bk-text-2xs">
-            {activeSavedView.label}
-          </span>
-        </div>
-      )}
-
       {me && (
         <div className="bk-flex bk-items-center bk-gap-3 bk-rounded-full bk-bg-brand-surface bk-border bk-border-brand-ring/40 bk-px-4 bk-py-2 bk-text-sm">
           <span className="bk-text-brand-muted">Wallet</span>
