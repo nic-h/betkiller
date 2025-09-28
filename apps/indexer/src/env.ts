@@ -47,5 +47,7 @@ export const env = {
   logMinSpan: Number(process.env.LOG_MIN_SPAN ?? "100"),
   rpcQps: Number(process.env.RPC_QPS ?? "2"),
   rpcTimeoutMs: Number(process.env.RPC_TIMEOUT_MS ?? "15000"),
-  rpcMaxRetries: Number(process.env.RPC_MAX_RETRIES ?? process.env.RPC_MAX_ATTEMPTS ?? "7")
+  rpcMaxRetries: Number(process.env.RPC_MAX_RETRIES ?? process.env.RPC_MAX_ATTEMPTS ?? "7"),
+  mentionFeedUrl: process.env.MENTION_FEED_URL?.trim() ?? "",
+  mentionFetchIntervalMs: Number(process.env.MENTION_FETCH_INTERVAL_MS ?? "300000")
 } as const;

@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useTransition } from "react";
 import type { NearResolutionItem } from "@/lib/db";
-import { formatDateShort } from "@/lib/fmt";
+import { formatDateShort, formatHoursUntil, formatMoney } from "@/lib/fmt";
 
 export function NearResolutionList({ initial }: { initial: NearResolutionItem[] }) {
   const [items, setItems] = useState(initial);
@@ -25,26 +25,36 @@ export function NearResolutionList({ initial }: { initial: NearResolutionItem[] 
   }, []);
 
   return (
-    <section className="bk-rounded-lg bk-bg-surface bk-ring-1 bk-ring-border bk-shadow-sm bk-p-4 bk-space-y-3">
+    <section className="bk-rounded-2xl bk-bg-brand-panel bk-ring-1 bk-ring-brand-ring/60 bk-p-5 bk-space-y-3">
       <header className="bk-flex bk-items-center bk-justify-between">
-        <h2 className="bk-text-sm bk-uppercase bk-tracking-widest bk-text-muted">Near Resolution</h2>
-        {isPending && <span className="bk-text-xs bk-text-muted">Refreshing…</span>}
+        <h2 className="bk-text-sm bk-text-brand-muted">Near resolution</h2>
+        {isPending && <span className="bk-text-xs bk-text-brand-muted">Refreshing…</span>}
       </header>
       <div className="bk-space-y-2">
         {items.map((item) => (
-          <div key={item.marketId} className="bk-flex bk-items-center bk-justify-between bk-text-sm">
-            <a
-              href={`https://context.markets/markets/${item.marketId}`}
-              target="_blank"
-              rel="noreferrer"
-              className="bk-text-accent"
-            >
-              {item.title}
-            </a>
-            <span className="bk-text-xs bk-text-muted">{formatDateShort(item.cutoffTs)}</span>
+          <div key={item.marketId} className="bk-space-y-1 bk-border bk-border-brand-ring/40 bk-rounded-xl bk-p-3">
+            <div className="bk-flex bk-items-center bk-justify-between bk-text-sm">
+              <a
+                href={`https://context.markets/markets/${item.marketId}`}
+                target="_blank"
+                rel="noreferrer"
+                className="bk-text-brand-blue hover:bk-text-brand-text"
+              >
+                {item.title}
+              </a>
+              <span className="bk-text-xs bk-text-brand-muted">{formatHoursUntil(item.cutoffTs)}</span>
+            </div>
+            <div className="bk-flex bk-items-center bk-justify-between bk-text-2xs bk-text-brand-muted">
+              <span>Resolves {formatDateShort(item.cutoffTs)}</span>
+              <span>TVL {formatMoney(item.tvl)}</span>
+              <span>Boost {formatMoney(item.boostTotal)}</span>
+              {item.costToMove && item.costToMove.costPerPoint != null && (
+                <span>Δ1pt {formatMoney(item.costToMove.costPerPoint)}</span>
+              )}
+            </div>
           </div>
         ))}
-        {items.length === 0 && <p className="bk-text-sm bk-text-muted">Nothing within the next 72h.</p>}
+        {items.length === 0 && <p className="bk-text-sm bk-text-brand-muted">Nothing within the next 72h.</p>}
       </div>
     </section>
   );

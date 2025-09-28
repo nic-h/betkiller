@@ -4,6 +4,8 @@ import fs from "fs";
 import path from "path";
 import { gunzipSync } from "node:zlib";
 
+import { analyzeMarketHeuristics, type MarketHeuristics } from "./heuristics";
+
 const DB_PATH =
   process.env.SQLITE_PATH ?? process.env.BK_DB ?? process.env.DATABASE_PATH ?? "../../data/context-edge.db";
 const ME_ADDRESS = process.env.BK_ME?.toLowerCase() ?? null;
@@ -31,6 +33,16 @@ export function getDatabase(): BetterSqliteDatabase {
 
 export function db(): BetterSqliteDatabase {
   return getDatabase();
+}
+
+function withWriteDatabase<T>(fn: (database: BetterSqliteDatabase) => T): T {
+  const dbPath = resolveDatabasePath();
+  const writable = new Database(dbPath, { readonly: false, fileMustExist: true });
+  try {
+    return fn(writable);
+  } finally {
+    writable.close();
+  }
 }
 
 export function hasTable(name: string): boolean {
@@ -64,6 +76,30 @@ export function cutoff(range?: string): number {
   }
 }
 
+function rangeWindowSeconds(range?: string): number | null {
+  const nowSec = Math.floor(Date.now() / 1000);
+  const day = 24 * 60 * 60;
+  const normalized = (range ?? "14d").toLowerCase();
+  switch (normalized) {
+    case "24h":
+      return day;
+    case "7d":
+      return 7 * day;
+    case "14d":
+      return 14 * day;
+    case "30d":
+      return 30 * day;
+    case "ytd": {
+      const now = new Date();
+      const start = Date.UTC(now.getUTCFullYear(), 0, 1) / 1000;
+      return Math.max(0, Math.floor(nowSec - start));
+    }
+    case "all":
+    default:
+      return null;
+  }
+}
+
 function microsToNumber(value: unknown): number {
   if (value === null || value === undefined) return 0;
   if (typeof value === "number") return value / 1_000_000;
@@ -76,6 +112,14 @@ function microsToNumber(value: unknown): number {
     }
   }
   return 0;
+}
+
+function dollars(value: number): number {
+  return Number(value.toFixed(2));
+}
+
+function formatUsd(value: number): string {
+  return `$${value.toFixed(0)}`;
 }
 
 function sumPayloadAmounts(payloadJson: string): bigint {
@@ -177,6 +221,7 @@ export type LeaderboardRow = {
   efficiency: number;
   marketsTouched: number;
   recentRewardTs: number | null;
+  lastSeen: number | null;
 };
 
 export function getLeaderboard(range: LeaderboardRange, bucket: LeaderboardBucket): LeaderboardRow[] {
@@ -206,7 +251,7 @@ export function getLeaderboard(range: LeaderboardRange, bucket: LeaderboardBucke
     .all(cutoff) as { addr: string; stake: number | null; markets: number }[];
 
   const profileStmt = db.prepare(
-    `SELECT display_name AS displayName, x_handle AS xHandle
+    `SELECT display_name AS displayName, x_handle AS xHandle, last_seen AS lastSeen
      FROM profiles
      WHERE lower(address) = ?`
   );
@@ -221,7 +266,7 @@ export function getLeaderboard(range: LeaderboardRange, bucket: LeaderboardBucke
 
   const results: LeaderboardRow[] = rewardRows
     .map((row) => {
-      const profile = profileStmt.get(row.addr) as { displayName: string | null; xHandle: string | null } | undefined;
+      const profile = profileStmt.get(row.addr) as { displayName: string | null; xHandle: string | null; lastSeen: number | null } | undefined;
       const stakeInfo = stakeMap.get(row.addr) ?? { stake: 0, markets: 0 };
       const rewardMicro = row.reward ?? 0;
       const rewardDollars = rewardMicro / 1_000_000;
@@ -237,7 +282,8 @@ export function getLeaderboard(range: LeaderboardRange, bucket: LeaderboardBucke
         rewardTrader: 0,
         efficiency,
         marketsTouched: stakeInfo.markets ?? 0,
-        recentRewardTs: row.last_ts ?? null
+        recentRewardTs: row.last_ts ?? null,
+        lastSeen: profile?.lastSeen ?? null
       };
     })
     .sort((a, b) => {
@@ -251,6 +297,15 @@ export function getLeaderboard(range: LeaderboardRange, bucket: LeaderboardBucke
   return results;
 }
 
+export type SlatePricePoint = { ts: number; prices: number[] };
+export type SlateTvlPoint = { ts: number; tvl: number };
+export type EdgeBreakdown = {
+  boost: number;
+  volume: number;
+  traders: number;
+  cutoffWindow: number;
+};
+
 export type SlateItem = {
   marketId: string;
   title: string;
@@ -259,21 +314,80 @@ export type SlateItem = {
   volume24h: number;
   uniqueTraders24h: number;
   edgeScore: number;
+  edgeBreakdown: EdgeBreakdown;
   tvl: number;
   depth: number;
+  oracle: string | null;
+  surplusRecipient: string | null;
+  questionId: string | null;
+  outcomes: string[];
+  lastPrices: number[];
+  priceSeries: SlatePricePoint[];
+  tvlSeries: SlateTvlPoint[];
+  costToMove: {
+    usdc: number;
+    deltaProb: number;
+    costPerPoint: number | null;
+  } | null;
+  heuristics: {
+    clarity: number;
+    ambiguousTerms: string[];
+    vagueCount: number;
+    sourceCount: number;
+    sourceDomains: number;
+    sourceParity: number;
+    settlementScore: number;
+    warnings: string[];
+  } | null;
 };
 
-export function getLiveSlate(): SlateItem[] {
+export type ActionQueueItem = {
+  marketId: string;
+  title: string;
+  action: "boost" | "bet" | "monitor";
+  rationale: string;
+  score: number;
+  hoursToCutoff: number;
+  edgeScore: number;
+  boostTotal: number;
+  boostTarget: number;
+  boostGap: number;
+  tvl: number;
+  costToMove?: number | null;
+  clarityScore?: number | null;
+};
+
+export type LiquidityHoleItem = {
+  marketId: string;
+  title: string;
+  boostTotal: number;
+  boostTarget: number;
+  boostGap: number;
+  tvl: number;
+  edgeScore: number;
+  hoursToCutoff: number;
+  costToMove?: number | null;
+};
+
+export function getLiveSlate(limit = 20): SlateItem[] {
   const db = getDatabase();
   const now = Math.floor(Date.now() / 1000);
   const cutoff24h = now - 24 * 3600;
 
-  const markets = db
+  const marketRows = db
     .prepare(
-      `SELECT marketId, metadata, createdAt
+      `SELECT marketId, metadata, outcomeNames, oracle, surplusRecipient, questionId, createdAt
        FROM markets`
     )
-    .all() as { marketId: string; metadata: string | null; createdAt: number | null }[];
+    .all() as {
+      marketId: string;
+      metadata: string | null;
+      outcomeNames: string | null;
+      oracle: string | null;
+      surplusRecipient: string | null;
+      questionId: string | null;
+      createdAt: number | null;
+    }[];
 
   const tradeRows = db
     .prepare(
@@ -285,14 +399,7 @@ export function getLiveSlate(): SlateItem[] {
     )
     .all(cutoff24h) as { marketId: string; volume: number | null; traders: number | null }[];
 
-  const lockRows = db
-    .prepare(
-      `SELECT marketId, type, payloadJson
-       FROM locks`
-    )
-    .all() as { marketId: string; type: string | null; payloadJson: string | null }[];
-
-  const stateRows = db
+  const latestStateRows = db
     .prepare(
       `SELECT marketId, totalUsdc, totalQ
        FROM market_state
@@ -308,130 +415,877 @@ export function getLiveSlate(): SlateItem[] {
     });
   }
 
-  const boostMap = new Map<string, { sponsored: bigint; unlocked: bigint }>();
-  for (const row of lockRows) {
-    const marketId = row.marketId;
-    if (!marketId) continue;
-    const entry = boostMap.get(marketId) ?? { sponsored: 0n, unlocked: 0n };
-    const kind = (row.type ?? "").toLowerCase();
-    if (kind === "sponsored") {
-      const amount = parseSponsoredAmount(row.payloadJson);
-      entry.sponsored += amount;
-    } else if (kind === "unlock" || kind === "unlocked") {
-      const amount = parseUnlockedAmount(row.payloadJson);
-      entry.unlocked += amount;
-    }
-    boostMap.set(marketId, entry);
-  }
+  const boostMap = computeBoostBalances(db);
 
   const tvlMap = new Map<string, { totalUsdc: number; totalQ: number }>();
-  for (const row of stateRows) {
+  for (const row of latestStateRows) {
     tvlMap.set(row.marketId, {
       totalUsdc: microsToNumber(row.totalUsdc),
       totalQ: microsToNumber(row.totalQ)
     });
   }
 
-  return markets
-    .map((market) => {
-      const meta = interpretMetadata(market.metadata);
-      const title = meta.title ?? market.marketId;
-      const volumeInfo = volumeMap.get(market.marketId) ?? { volume: 0, traders: 0 };
-      const boostEntry = boostMap.get(market.marketId) ?? { sponsored: 0n, unlocked: 0n };
-      const outstanding = boostEntry.sponsored > boostEntry.unlocked ? boostEntry.sponsored - boostEntry.unlocked : 0n;
-      const boostTotal = Number(outstanding) / 1_000_000;
-      const volume24h = (volumeInfo.volume ?? 0) / 1_000_000;
-      const uniqueTraders24h = volumeInfo.traders ?? 0;
-      const fallbackCutoff = (market.createdAt ?? now) + 72 * 3600;
-      const cutoffCandidate = meta.cutoffTs ?? null;
-      const cutoffTs = cutoffCandidate && cutoffCandidate > 0 ? cutoffCandidate : fallbackCutoff;
-      const edgeScore = (boostTotal * 0.4 + volume24h * 0.4 + uniqueTraders24h * 0.2) * ((cutoffTs - now >= 3600 && cutoffTs - now <= 7 * 86400) ? 1 : 0.6);
-      const state = tvlMap.get(market.marketId) ?? { totalUsdc: 0, totalQ: 0 };
-      return {
-        marketId: market.marketId,
-        title,
-        cutoffTs,
-        boostTotal,
-        volume24h,
-        uniqueTraders24h,
-        edgeScore,
-        tvl: state.totalUsdc,
-        depth: state.totalQ
+  const baseItems = marketRows.map((market) => {
+    const meta = interpretMetadata(market.metadata);
+    const heuristics = meta.heuristics;
+    const heuristicsSummary = heuristics
+      ? {
+          clarity: heuristics.rule.clarityScore,
+          ambiguousTerms: heuristics.rule.ambiguousTerms,
+          vagueCount: heuristics.rule.vaguePhraseCount,
+          sourceCount: heuristics.sources.urls.length,
+          sourceDomains: heuristics.sources.domains.length,
+          sourceParity: heuristics.sources.parityScore,
+          settlementScore: heuristics.settlement.score,
+          warnings: heuristics.settlement.warnings
+        }
+      : null;
+    const title = meta.title ?? market.marketId;
+    const volumeInfo = volumeMap.get(market.marketId) ?? { volume: 0, traders: 0 };
+    const boostEntry = boostMap.get(market.marketId) ?? { sponsored: 0n, unlocked: 0n };
+    const outstanding = boostEntry.sponsored > boostEntry.unlocked ? boostEntry.sponsored - boostEntry.unlocked : 0n;
+    const boostTotal = Number(outstanding) / 1_000_000;
+    const volume24h = (volumeInfo.volume ?? 0) / 1_000_000;
+    const uniqueTraders24h = volumeInfo.traders ?? 0;
+    const fallbackCutoff = (market.createdAt ?? now) + 72 * 3600;
+    const cutoffCandidate = meta.cutoffTs ?? null;
+    const cutoffTs = cutoffCandidate && cutoffCandidate > 0 ? cutoffCandidate : fallbackCutoff;
+    const cutoffMultiplier = cutoffWeight(cutoffTs, now);
+    const boostComponent = boostTotal * 0.4;
+    const volumeComponent = volume24h * 0.4;
+    const traderComponent = uniqueTraders24h * 0.2;
+    const edgeScore = (boostComponent + volumeComponent + traderComponent) * cutoffMultiplier;
+    const edgeBreakdown: EdgeBreakdown = {
+      boost: Number(boostComponent.toFixed(3)),
+      volume: Number(volumeComponent.toFixed(3)),
+      traders: Number(traderComponent.toFixed(3)),
+      cutoffWindow: Number(cutoffMultiplier.toFixed(3))
+    };
+    const state = tvlMap.get(market.marketId) ?? { totalUsdc: 0, totalQ: 0 };
+    return {
+      marketId: market.marketId,
+      title,
+      cutoffTs,
+      boostTotal,
+      volume24h,
+      uniqueTraders24h,
+      edgeScore,
+      edgeBreakdown,
+      tvl: state.totalUsdc,
+      depth: state.totalQ,
+      oracle: market.oracle ?? null,
+      surplusRecipient: market.surplusRecipient ?? null,
+      questionId: market.questionId ?? null,
+      outcomes: parseOutcomeNames(market.outcomeNames),
+      lastPrices: [] as number[],
+      priceSeries: [] as SlatePricePoint[],
+      tvlSeries: [] as SlateTvlPoint[],
+      costToMove: null as SlateItem["costToMove"],
+      heuristics: heuristicsSummary
+    } satisfies SlateItem;
+  });
+
+  const ordered = baseItems.sort((a, b) => b.edgeScore - a.edgeScore);
+  const selected = typeof limit === "number" ? ordered.slice(0, limit) : ordered;
+
+  const priceStmt = db.prepare(
+    `SELECT ts, pricesJson
+     FROM prices
+     WHERE marketId = ?
+     ORDER BY ts DESC
+     LIMIT 24`
+  );
+
+  const tvlHistoryStmt = db.prepare(
+    `SELECT ts, totalUsdc
+     FROM market_state
+     WHERE marketId = ?
+     ORDER BY ts DESC
+     LIMIT 24`
+  );
+
+  const impactStmt = db.prepare(
+    `SELECT usdcClip, deltaProb
+     FROM impact
+     WHERE marketId = ?
+     ORDER BY ts DESC
+     LIMIT 1`
+  );
+
+  for (const item of selected) {
+    const priceRows = priceStmt.all(item.marketId) as { ts: number; pricesJson: string }[];
+    const priceSeries = priceRows
+      .map((row) => ({ ts: row.ts, prices: parsePriceVector(row.pricesJson) }))
+      .reverse();
+    const lastPrices = priceSeries.length > 0 ? priceSeries[priceSeries.length - 1].prices : [];
+
+    const tvlRows = tvlHistoryStmt.all(item.marketId) as { ts: number; totalUsdc: string }[];
+    const tvlSeries = tvlRows
+      .map((row) => ({ ts: row.ts, tvl: microsToNumber(row.totalUsdc) }))
+      .reverse();
+
+    const impactRow = impactStmt.get(item.marketId) as { usdcClip: string | null; deltaProb: number | null } | undefined;
+    let costToMove: SlateItem["costToMove"] = null;
+    if (impactRow) {
+      const usdc = microsToNumber(impactRow.usdcClip ?? 0);
+      const deltaProb = Number(impactRow.deltaProb ?? 0);
+      const costPerPoint = deltaProb > 0 ? Number((usdc * (0.01 / deltaProb)).toFixed(2)) : null;
+      costToMove = {
+        usdc: Number(usdc.toFixed(2)),
+        deltaProb,
+        costPerPoint
       };
+    }
+
+    item.priceSeries = priceSeries;
+    item.lastPrices = lastPrices;
+    item.tvlSeries = tvlSeries;
+    item.costToMove = costToMove;
+  }
+
+  return selected;
+}
+
+export function getActionQueue(limit = 6): ActionQueueItem[] {
+  const now = Math.floor(Date.now() / 1000);
+  const slate = getLiveSlate(80);
+  const BOOST_TARGET = 2000; // USD target for meaningful liquidity
+
+  const scored: ActionQueueItem[] = slate.map((item) => {
+    const hoursToCutoff = Math.max(0.5, (item.cutoffTs - now) / 3600);
+    const urgency = Math.min(1.5, 24 / hoursToCutoff);
+    const boostGap = Math.max(0, BOOST_TARGET - item.boostTotal);
+    const liquidityScore = boostGap > 0 ? Math.min(1, boostGap / BOOST_TARGET) : 0;
+    const edgeComponent = Math.min(5, item.edgeScore / 10);
+    const clarityScore = item.heuristics?.clarity ?? null;
+    const clarityPenalty = clarityScore != null && clarityScore < 0.5 ? -0.5 : 0;
+    const settlementPenalty = item.heuristics?.settlementScore != null && item.heuristics.settlementScore < 0.5 ? -0.3 : 0;
+    const score = Number((edgeComponent + urgency + liquidityScore + clarityPenalty + settlementPenalty).toFixed(3));
+
+    let action: ActionQueueItem["action"] = "monitor";
+    let rationale = "Keep monitoring market conditions.";
+    if (boostGap >= 250) {
+      action = "boost";
+      rationale = `Liquidity short by $${boostGap.toFixed(0)} to hit $${BOOST_TARGET.toFixed(0)} target.`;
+    } else if (item.edgeScore >= 35) {
+      action = "bet";
+      rationale = `Strong edge (${item.edgeScore.toFixed(1)}) with TVL ${formatUsd(item.tvl)}.`;
+    } else if (item.costToMove && item.costToMove.costPerPoint != null && item.costToMove.costPerPoint > 0) {
+      action = "boost";
+      rationale = `Cost to move 1pt is ${formatUsd(item.costToMove.costPerPoint)}, consider topping up.`;
+    }
+
+    return {
+      marketId: item.marketId,
+      title: item.title,
+      action,
+      rationale,
+      score,
+      hoursToCutoff: Number(hoursToCutoff.toFixed(1)),
+      edgeScore: Number(item.edgeScore.toFixed(2)),
+      boostTotal: Number(item.boostTotal.toFixed(2)),
+      boostTarget: BOOST_TARGET,
+      boostGap: Number(boostGap.toFixed(2)),
+      tvl: Number(item.tvl.toFixed(2)),
+      costToMove: item.costToMove?.costPerPoint ?? item.costToMove?.usdc ?? null,
+      clarityScore
+    } satisfies ActionQueueItem;
+  });
+
+  return scored
+    .sort((a, b) => b.score - a.score)
+    .slice(0, limit);
+}
+
+export function getLiquidityHoles(limit = 16): LiquidityHoleItem[] {
+  const now = Math.floor(Date.now() / 1000);
+  const BOOST_TARGET = 2500;
+  return getLiveSlate(120)
+    .map((item) => {
+      const hoursToCutoff = Math.max(0.5, (item.cutoffTs - now) / 3600);
+      const boostGap = Math.max(0, BOOST_TARGET - item.boostTotal);
+      return {
+        marketId: item.marketId,
+        title: item.title,
+        boostTotal: Number(item.boostTotal.toFixed(2)),
+        boostTarget: BOOST_TARGET,
+        boostGap: Number(boostGap.toFixed(2)),
+        tvl: Number(item.tvl.toFixed(2)),
+        edgeScore: Number(item.edgeScore.toFixed(2)),
+        hoursToCutoff: Number(hoursToCutoff.toFixed(1)),
+        costToMove: item.costToMove?.costPerPoint ?? item.costToMove?.usdc ?? null
+      } satisfies LiquidityHoleItem;
     })
-    .sort((a, b) => b.edgeScore - a.edgeScore)
-    .slice(0, 20);
+    .filter((item) => item.boostGap >= 200)
+    .sort((a, b) => {
+      const gapDiff = b.boostGap - a.boostGap;
+      if (gapDiff !== 0) return gapDiff;
+      return a.hoursToCutoff - b.hoursToCutoff;
+    })
+    .slice(0, limit);
 }
 
 export type NearResolutionItem = {
   marketId: string;
   title: string;
   cutoffTs: number;
+  tvl: number;
+  boostTotal: number;
+  costToMove: SlateItem["costToMove"];
 };
 
 export function getNearResolution(): NearResolutionItem[] {
   const now = Math.floor(Date.now() / 1000);
-  return getLiveSlate()
+  return getLiveSlate(80)
     .filter((item) => item.cutoffTs >= now && item.cutoffTs <= now + 3 * 86400)
     .sort((a, b) => a.cutoffTs - b.cutoffTs)
     .slice(0, 50)
-    .map(({ marketId, title, cutoffTs }) => ({ marketId, title, cutoffTs }));
+    .map(({ marketId, title, cutoffTs, tvl, boostTotal, costToMove }) => ({
+      marketId,
+      title,
+      cutoffTs,
+      tvl,
+      boostTotal,
+      costToMove
+    }));
 }
+
+export type ResolvedMarket = {
+  marketId: string;
+  title: string;
+  resolvedAt: number;
+  outcomes: { name: string; payout: number }[];
+  surplus: number;
+  totalRedeemed: number;
+  redeemerCount: number;
+};
+
+export function getResolvedMarkets(limit = 12): ResolvedMarket[] {
+  const db = getDatabase();
+  const resolutionRows = db
+    .prepare(
+      `SELECT marketId, ts, surplus, payoutJson
+       FROM resolutions
+       ORDER BY ts DESC
+       LIMIT ?`
+    )
+    .all(limit) as { marketId: string; ts: number; surplus: string | null; payoutJson: string | null }[];
+
+  if (resolutionRows.length === 0) return [];
+
+  const marketRows = db
+    .prepare(
+      `SELECT marketId, metadata, outcomeNames
+       FROM markets
+       WHERE marketId IN (${resolutionRows.map(() => "?").join(",")})`
+    )
+    .all(...resolutionRows.map((row) => row.marketId)) as { marketId: string; metadata: string | null; outcomeNames: string | null }[];
+
+  const marketInfo = new Map<string, { title: string; outcomes: string[] }>();
+  for (const row of marketRows) {
+    const meta = interpretMetadata(row.metadata);
+    marketInfo.set(row.marketId, {
+      title: meta.title ?? row.marketId,
+      outcomes: parseOutcomeNames(row.outcomeNames)
+    });
+  }
+
+  const redemptionStmt = db.prepare(
+    `SELECT SUM(CAST(payout AS INTEGER)) AS total, COUNT(DISTINCT redeemer) AS redeemers
+     FROM redemptions
+     WHERE marketId = ?`
+  );
+
+  const resolved: ResolvedMarket[] = [];
+  for (const row of resolutionRows) {
+    const info = marketInfo.get(row.marketId) ?? { title: row.marketId, outcomes: [] };
+    const payoutValues = parsePayouts(row.payoutJson, info.outcomes.length);
+    const outcomes = info.outcomes.length
+      ? info.outcomes.map((name, index) => ({ name, payout: payoutValues[index] ?? 0 }))
+      : payoutValues.map((value, index) => ({ name: `Outcome ${index + 1}`, payout: value }));
+
+    const redemptionRow = redemptionStmt.get(row.marketId) as { total: number | null; redeemers: number | null } | undefined;
+    const totalRedeemed = microsToNumber(redemptionRow?.total ?? 0);
+    const redeemerCount = redemptionRow?.redeemers ?? 0;
+
+    resolved.push({
+      marketId: row.marketId,
+      title: info.title,
+      resolvedAt: row.ts,
+      outcomes,
+      surplus: microsToNumber(row.surplus ?? 0),
+      totalRedeemed,
+      redeemerCount
+    });
+  }
+
+  return resolved;
+}
+
+export type RewardContributionKind = "create" | "boost" | "trade" | "claim";
+
+export type RewardContribution = {
+  kind: RewardContributionKind;
+  marketId: string | null;
+  marketTitle?: string | null;
+  amount: number;
+  ts: number;
+  txHash?: string | null;
+  description?: string;
+};
 
 export type RewardSplit = {
   bucket: string;
   reward: number;
   stake: number;
+  change?: number;
+  contributions: RewardContribution[];
 };
 
 export function getMySummary(range: LeaderboardRange): RewardSplit[] {
   if (!ME_ADDRESS) return [];
+  const address = ME_ADDRESS;
   const db = getDatabase();
   const cutoff = rangeCutoff(range);
+  const windowLength = rangeWindowSeconds(range);
+  const previousCutoff = windowLength != null ? cutoff - windowLength : null;
 
-  const rewardRow = db
-    .prepare(
-      `SELECT SUM(CAST(amount AS INTEGER)) AS reward
-       FROM rewards
-       WHERE user = ? AND kind = 'claim' AND ts >= ?`
-    )
-    .get(ME_ADDRESS, cutoff) as { reward: number | null } | undefined;
+  const rewardStmt = db.prepare(
+    `SELECT SUM(CAST(amount AS INTEGER)) AS reward
+     FROM rewards
+     WHERE lower(user) = ? AND kind = 'claim' AND ts >= ?`
+  );
+  const totalReward = dollars(microsToNumber((rewardStmt.get(address, cutoff) as { reward: number | null } | undefined)?.reward ?? 0));
+  let previousReward = 0;
+  if (previousCutoff != null) {
+    const prevRewardRow = db
+      .prepare(
+        `SELECT SUM(CAST(amount AS INTEGER)) AS reward
+         FROM rewards
+         WHERE lower(user) = ? AND kind = 'claim' AND ts >= ? AND ts < ?`
+      )
+      .get(address, previousCutoff, cutoff) as { reward: number | null } | undefined;
+    previousReward = dollars(microsToNumber(prevRewardRow?.reward ?? 0));
+  }
 
-  const stakeRow = db
-    .prepare(
-      `SELECT SUM(CAST(usdcIn AS INTEGER)) AS stake
-       FROM trades
-       WHERE trader = ? AND ts >= ?`
-    )
-    .get(ME_ADDRESS, cutoff) as { stake: number | null } | undefined;
-
-  const totalReward = microsToNumber(rewardRow?.reward ?? 0);
-  const totalStake = microsToNumber(stakeRow?.stake ?? 0);
+  const stakeStmt = db.prepare(
+    `SELECT SUM(CAST(usdcIn AS INTEGER)) AS stake
+     FROM trades
+     WHERE lower(trader) = ? AND ts >= ?`
+  );
+  const totalStake = dollars(microsToNumber((stakeStmt.get(address, cutoff) as { stake: number | null } | undefined)?.stake ?? 0));
 
   const bucketRows = db
     .prepare(
       `SELECT kind, SUM(CAST(amount AS INTEGER)) AS reward
        FROM rewards
-       WHERE user = ? AND kind IN ('creator', 'booster', 'trader') AND ts >= ?
+       WHERE lower(user) = ? AND kind IN ('creator', 'booster', 'trader') AND ts >= ?
        GROUP BY kind`
     )
-    .all(ME_ADDRESS, cutoff) as { kind: string; reward: number | null }[];
+    .all(address, cutoff) as { kind: string; reward: number | null }[];
 
-  const splits: RewardSplit[] = [{ bucket: 'TOTAL', reward: totalReward, stake: totalStake }];
-
+  const bucketRewardMap = new Map<string, number>();
   for (const row of bucketRows) {
-    const key = row.kind.toUpperCase();
-    const reward = microsToNumber(row.reward ?? 0);
-    splits.push({ bucket: key, reward, stake: 0 });
+    bucketRewardMap.set(row.kind.toUpperCase(), dollars(microsToNumber(row.reward ?? 0)));
+  }
+
+  const previousBucketRewardMap = new Map<string, number>();
+  if (previousCutoff != null) {
+    const prevBucketRows = db
+      .prepare(
+        `SELECT kind, SUM(CAST(amount AS INTEGER)) AS reward
+         FROM rewards
+         WHERE lower(user) = ? AND kind IN ('creator', 'booster', 'trader') AND ts >= ? AND ts < ?
+         GROUP BY kind`
+      )
+      .all(address, previousCutoff, cutoff) as { kind: string; reward: number | null }[];
+    for (const row of prevBucketRows) {
+      previousBucketRewardMap.set(row.kind.toUpperCase(), dollars(microsToNumber(row.reward ?? 0)));
+    }
+  }
+
+  const creatorContributions = collectCreatorContributions(db, address, cutoff);
+  const boosterContributions = collectBoosterContributions(db, address, cutoff);
+  const traderContributions = collectTraderContributions(db, address, cutoff);
+  const claimContributions = collectClaimContributions(db, address, cutoff);
+
+const splits: RewardSplit[] = [];
+
+  const totalChange = previousCutoff != null ? dollars(totalReward - previousReward) : undefined;
+  splits.push({
+    bucket: "TOTAL",
+    reward: totalReward,
+    stake: totalStake,
+    change: totalChange,
+    contributions: claimContributions
+  });
+
+  const bucketDefs: Array<{ key: string; contributions: RewardContribution[]; includeStake?: boolean }> = [
+    { key: "CREATOR", contributions: creatorContributions },
+    { key: "BOOSTER", contributions: boosterContributions },
+    { key: "TRADER", contributions: traderContributions, includeStake: true }
+  ];
+
+  for (const def of bucketDefs) {
+    const rewardValue = bucketRewardMap.get(def.key) ?? 0;
+    const prevValue = previousCutoff != null ? previousBucketRewardMap.get(def.key) ?? 0 : undefined;
+    const change = prevValue !== undefined ? dollars(rewardValue - prevValue) : undefined;
+    splits.push({
+      bucket: def.key,
+      reward: rewardValue,
+      stake: def.includeStake ? totalStake : 0,
+      change,
+      contributions: def.contributions
+    });
   }
 
   return splits;
+}
+
+let marketTitleStmt: ReturnType<BetterSqliteDatabase["prepare"]> | null = null;
+const marketTitleCache = new Map<string, string>();
+
+function lookupMarketTitle(db: BetterSqliteDatabase, marketId: string): string {
+  const cached = marketTitleCache.get(marketId);
+  if (cached) return cached;
+  if (!marketTitleStmt) {
+    marketTitleStmt = db.prepare(`SELECT metadata FROM markets WHERE marketId = ?`);
+  }
+  const row = marketTitleStmt.get(marketId) as { metadata: string | null } | undefined;
+  const title = deriveTitle(row?.metadata ?? null) ?? marketId;
+  marketTitleCache.set(marketId, title);
+  return title;
+}
+
+function collectCreatorContributions(db: BetterSqliteDatabase, address: string, cutoff: number): RewardContribution[] {
+  const rows = db
+    .prepare(
+      `SELECT marketId, metadata, createdAt
+       FROM markets
+       WHERE lower(creator) = ? AND createdAt >= ?
+       ORDER BY createdAt DESC
+       LIMIT 10`
+    )
+    .all(address, cutoff) as { marketId: string; metadata: string | null; createdAt: number | null }[];
+
+  return rows.map((row) => ({
+    kind: "create" as const,
+    marketId: row.marketId,
+    marketTitle: deriveTitle(row.metadata) ?? row.marketId,
+    amount: 0,
+    ts: row.createdAt ?? cutoff,
+    description: "Created market"
+  }));
+}
+
+function collectBoosterContributions(db: BetterSqliteDatabase, address: string, cutoff: number): RewardContribution[] {
+  const rows = db
+    .prepare(
+      `SELECT marketId, ts, actualCost, userPaid, subsidyUsed, txHash
+       FROM sponsored_locks
+       WHERE lower(user) = ? AND ts >= ?
+       ORDER BY ts DESC
+       LIMIT 10`
+    )
+    .all(address, cutoff) as {
+      marketId: string;
+      ts: number | null;
+      actualCost: string | null;
+      userPaid: string | null;
+      subsidyUsed: string | null;
+      txHash: string | null;
+    }[];
+
+  return rows.map((row) => {
+    const actual = aggregateAmounts(row.actualCost ?? 0);
+    const userPaid = aggregateAmounts(row.userPaid ?? 0);
+    const subsidy = aggregateAmounts(row.subsidyUsed ?? 0);
+    const totalMicros = actual > 0n ? actual : userPaid + subsidy;
+    const amount = dollars(Number(totalMicros) / 1_000_000);
+    return {
+      kind: "boost" as const,
+      marketId: row.marketId,
+      marketTitle: lookupMarketTitle(db, row.marketId),
+      amount,
+      ts: row.ts ?? cutoff,
+      txHash: row.txHash ?? undefined,
+      description: "Boosted liquidity"
+    } satisfies RewardContribution;
+  });
+}
+
+function collectTraderContributions(db: BetterSqliteDatabase, address: string, cutoff: number): RewardContribution[] {
+  const rows = db
+    .prepare(
+      `SELECT marketId, ts, txHash, usdcIn, usdcOut
+       FROM trades
+       WHERE lower(trader) = ? AND ts >= ?
+       ORDER BY ts DESC
+       LIMIT 12`
+    )
+    .all(address, cutoff) as {
+      marketId: string;
+      ts: number | null;
+      txHash: string | null;
+      usdcIn: string | null;
+      usdcOut: string | null;
+    }[];
+
+  return rows.map((row) => {
+    const inMicros = aggregateAmounts(row.usdcIn ?? 0);
+    const outMicros = aggregateAmounts(row.usdcOut ?? 0);
+    const netMicros = inMicros - outMicros;
+    const rawAmount = Number(netMicros) / 1_000_000;
+    const amount = dollars(rawAmount);
+    const description = netMicros >= 0n ? "Bought positions" : "Sold positions";
+    return {
+      kind: "trade" as const,
+      marketId: row.marketId,
+      marketTitle: lookupMarketTitle(db, row.marketId),
+      amount,
+      ts: row.ts ?? cutoff,
+      txHash: row.txHash ?? undefined,
+      description
+    } satisfies RewardContribution;
+  });
+}
+
+function collectClaimContributions(db: BetterSqliteDatabase, address: string, cutoff: number): RewardContribution[] {
+  const rows = db
+    .prepare(
+      `SELECT tx_hash AS txHash, block_time AS blockTime, amount_usdc AS amount
+       FROM reward_claims
+       WHERE lower(wallet) = ? AND block_time >= ?
+       ORDER BY block_time DESC
+       LIMIT 15`
+    )
+    .all(address, cutoff) as { txHash: string | null; blockTime: number | null; amount: string | null }[];
+
+  return rows.map((row) => ({
+    kind: "claim" as const,
+    marketId: null,
+    amount: dollars(microsToNumber(row.amount ?? 0)),
+    ts: row.blockTime ?? cutoff,
+    txHash: row.txHash ?? undefined,
+    description: "Reward claimed"
+  }));
+}
+
+function parseOutcomeNames(value: string | null): string[] {
+  if (!value) return [];
+  try {
+    const parsed = JSON.parse(value);
+    if (Array.isArray(parsed)) {
+      return parsed.map((entry) => String(entry)).filter((entry) => entry.trim().length > 0);
+    }
+    return [];
+  } catch (error) {
+    return [];
+  }
+}
+
+function parsePriceVector(json: string | null): number[] {
+  if (!json) return [];
+  try {
+    const parsed = JSON.parse(json);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.map((entry) => microsToNumber(entry));
+  } catch (error) {
+    return [];
+  }
+}
+
+function cutoffWeight(cutoffTs: number, now: number): number {
+  const remaining = cutoffTs - now;
+  if (remaining >= 3600 && remaining <= 7 * 86400) {
+    return 1;
+  }
+  if (remaining <= 0) {
+    return 0.4;
+  }
+  return 0.6;
+}
+
+function parsePayouts(json: string | null, expected: number): number[] {
+  if (!json) return [];
+  try {
+    const parsed = JSON.parse(json);
+    if (!Array.isArray(parsed)) return [];
+    const payouts = parsed.map((value) => normalizePayout(value));
+    if (expected > payouts.length) {
+      while (payouts.length < expected) {
+        payouts.push(0);
+      }
+    }
+    return payouts;
+  } catch (error) {
+    return [];
+  }
+}
+
+function normalizePayout(value: unknown): number {
+  if (value === null || value === undefined) return 0;
+  const str = typeof value === "string" ? value : String(value);
+  if (!str) return 0;
+  const float = Number.parseFloat(str);
+  if (!Number.isFinite(float)) return 0;
+  if (float === 0) return 0;
+  if (float > 1) {
+    return Number((float / 1_000_000_000_000_000_000).toFixed(4));
+  }
+  return Number(float.toFixed(4));
+}
+
+function collectAddressMarkets(db: BetterSqliteDatabase, address: string, since?: number): Set<string> {
+  const markets = new Set<string>();
+
+  const tradeSql = since != null
+    ? `SELECT DISTINCT marketId FROM trades WHERE lower(trader) = ? AND ts >= ?`
+    : `SELECT DISTINCT marketId FROM trades WHERE lower(trader) = ?`;
+  const tradeStmt = db.prepare(tradeSql);
+  const tradeRows = since != null
+    ? (tradeStmt.all(address, since) as { marketId: string }[])
+    : (tradeStmt.all(address) as { marketId: string }[]);
+  for (const row of tradeRows) {
+    if (row.marketId) markets.add(row.marketId);
+  }
+
+  const boostSql = since != null
+    ? `SELECT DISTINCT marketId FROM sponsored_locks WHERE lower(user) = ? AND ts >= ?`
+    : `SELECT DISTINCT marketId FROM sponsored_locks WHERE lower(user) = ?`;
+  const boostStmt = db.prepare(boostSql);
+  const boostRows = since != null
+    ? (boostStmt.all(address, since) as { marketId: string }[])
+    : (boostStmt.all(address) as { marketId: string }[]);
+  for (const row of boostRows) {
+    if (row.marketId) markets.add(row.marketId);
+  }
+
+  const createSql = since != null
+    ? `SELECT marketId FROM markets WHERE lower(creator) = ? AND createdAt >= ?`
+    : `SELECT marketId FROM markets WHERE lower(creator) = ?`;
+  const createStmt = db.prepare(createSql);
+  const createRows = since != null
+    ? (createStmt.all(address, since) as { marketId: string }[])
+    : (createStmt.all(address) as { marketId: string }[]);
+  for (const row of createRows) {
+    if (row.marketId) markets.add(row.marketId);
+  }
+
+  return markets;
+}
+
+export function searchContextEntities(query: string, limit = 20): GlobalSearchResult[] {
+  const normalized = query.trim();
+  if (!normalized) return [];
+
+  const dbInstance = getDatabase();
+  const pattern = '%' + normalized.replace(/\s+/g, '%') + '%';
+  const limitValue = Math.max(5, Math.min(100, limit * 2));
+  const normalizedLower = normalized.toLowerCase();
+
+  const marketRows = dbInstance
+    .prepare(
+      `SELECT marketId, metadata, createdAt
+       FROM markets
+       WHERE metadata LIKE ? OR marketId LIKE ?
+       ORDER BY createdAt DESC
+       LIMIT ?`
+    )
+    .all(pattern, pattern, limitValue) as { marketId: string; metadata: string | null; createdAt: number | null }[];
+
+  const marketResults: GlobalSearchResult[] = marketRows.map((row) => {
+    const meta = interpretMetadata(row.metadata);
+    const title = meta.title ?? row.marketId;
+    const titleLower = title.toLowerCase();
+    let score = 0.5;
+    if (titleLower.includes(normalizedLower)) score += 0.25;
+    if (row.marketId.toLowerCase().includes(normalizedLower)) score += 0.15;
+    if ((meta.sourceUrls?.length ?? 0) > 0) score += 0.05;
+    return {
+      type: "market",
+      id: row.marketId,
+      title,
+      subtitle: meta.ruleText ?? undefined,
+      score: Number(Math.min(1, score).toFixed(3))
+    } satisfies GlobalSearchResult;
+  });
+
+  const walletRows = dbInstance
+    .prepare(
+      `SELECT address, display_name AS displayName, x_handle AS xHandle
+       FROM profiles
+       WHERE display_name LIKE ? OR x_handle LIKE ? OR address LIKE ?
+       LIMIT ?`
+    )
+    .all(pattern, pattern, pattern, limitValue) as { address: string; displayName: string | null; xHandle: string | null }[];
+
+  const walletResults: GlobalSearchResult[] = walletRows.map((row) => {
+    const title = row.displayName?.trim() || shortenAddress(row.address);
+    const subtitleParts = [] as string[];
+    if (row.xHandle) subtitleParts.push(`@${row.xHandle}`);
+    subtitleParts.push(shortenAddress(row.address));
+    let score = 0.45;
+    if ((row.displayName ?? "").toLowerCase().includes(normalizedLower)) score += 0.25;
+    if ((row.xHandle ?? "").toLowerCase().includes(normalizedLower.replace(/^@/, ""))) score += 0.2;
+    if (row.address.toLowerCase().includes(normalizedLower)) score += 0.1;
+    return {
+      type: "wallet",
+      id: row.address,
+      title,
+      subtitle: subtitleParts.join(" • "),
+      score: Number(Math.min(1, score).toFixed(3))
+    } satisfies GlobalSearchResult;
+  });
+
+  const combined = [...marketResults, ...walletResults]
+    .sort((a, b) => b.score - a.score)
+    .slice(0, limit);
+
+  return combined;
+}
+
+export function getSavedViews(): SavedView[] {
+  if (!hasTable("meta")) return [];
+  const dbInstance = getDatabase();
+  const rows = dbInstance
+    .prepare(`SELECT key, value FROM meta WHERE key LIKE 'saved_view:%'`)
+    .all() as { key: string; value: string }[];
+
+  const views: SavedView[] = [];
+  for (const row of rows) {
+    try {
+      const parsed = JSON.parse(row.value ?? "{}") as {
+        label?: string;
+        query?: string;
+        filters?: Record<string, unknown>;
+        createdAt?: number;
+        updatedAt?: number;
+      };
+      views.push({
+        id: row.key.slice("saved_view:".length),
+        label: parsed.label ?? row.key.slice("saved_view:".length),
+        query: parsed.query,
+        filters: parsed.filters,
+        createdAt: parsed.createdAt ?? null,
+        updatedAt: parsed.updatedAt ?? parsed.createdAt ?? null
+      });
+    } catch (error) {
+      views.push({
+        id: row.key.slice("saved_view:".length),
+        label: row.key.slice("saved_view:".length),
+        createdAt: null,
+        updatedAt: null
+      });
+    }
+  }
+
+  return views.sort((a, b) => {
+    const aTime = a.updatedAt ?? a.createdAt ?? 0;
+    const bTime = b.updatedAt ?? b.createdAt ?? 0;
+    return bTime - aTime;
+  });
+}
+
+type SavedViewPayload = {
+  label?: string | null;
+  query?: string | null;
+  filters?: Record<string, unknown> | null;
+};
+
+export function findSavedViewByQuery(query: string | null | undefined, views?: SavedView[]): SavedView | undefined {
+  const normalized = normalizeSavedViewQuery(query);
+  if (!normalized) return undefined;
+  const list = views ?? getSavedViews();
+  return list.find((view) => normalizeSavedViewQuery(view.query ?? "") === normalized);
+}
+
+export function upsertSavedView(id: string, payload: SavedViewPayload) {
+  if (!id || !id.trim()) {
+    throw new Error("saved_view_id_required");
+  }
+  const key = `saved_view:${id.trim()}`;
+  const existingRow = db()
+    .prepare(`SELECT value FROM meta WHERE key = ?`)
+    .get(key) as { value?: string } | undefined;
+
+  let existing: SavedViewPayload & { createdAt?: number | null; updatedAt?: number | null } = {};
+  if (existingRow?.value) {
+    try {
+      const parsed = JSON.parse(existingRow.value) as SavedViewPayload & {
+        createdAt?: number;
+        updatedAt?: number;
+      };
+      existing = parsed ?? {};
+    } catch (error) {
+      existing = {};
+    }
+  }
+
+  const now = Math.floor(Date.now() / 1000);
+  const label =
+    payload.label === undefined
+      ? (existing.label as string | undefined)
+      : payload.label?.trim() && payload.label.trim().length > 0
+        ? payload.label.trim()
+        : undefined;
+
+  const entry = {
+    label: label ?? id.trim(),
+    query: payload.query === undefined ? existing.query : payload.query?.trim() || undefined,
+    filters: payload.filters === undefined ? existing.filters : payload.filters ?? undefined,
+    createdAt: (existing.createdAt as number | null | undefined) ?? now,
+    updatedAt: now
+  };
+  withWriteDatabase((database) => {
+    database
+      .prepare(`INSERT INTO meta(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`)
+      .run(key, JSON.stringify(entry));
+  });
+}
+
+export function deleteSavedView(id: string) {
+  if (!id || !id.trim()) {
+    throw new Error("saved_view_id_required");
+  }
+  const key = `saved_view:${id.trim()}`;
+  withWriteDatabase((database) => {
+    database.prepare(`DELETE FROM meta WHERE key = ?`).run(key);
+  });
+}
+
+function getIndexerStatus(): IndexerStatus | null {
+  if (!hasTable("indexer_cursor")) return null;
+  const dbInstance = getDatabase();
+  const cursor = dbInstance
+    .prepare(`SELECT last_block as lastBlock, last_ts as lastTs FROM indexer_cursor WHERE chain_id = ?`)
+    .get(8453) as { lastBlock: number | null; lastTs: number | null } | undefined;
+  if (!cursor || cursor.lastBlock == null || cursor.lastTs == null) return null;
+
+  let seedCompleted = false;
+  if (hasTable("indexer_meta")) {
+    const metaRow = dbInstance
+      .prepare(`SELECT seed_completed as seedCompleted FROM indexer_meta WHERE chain_id = ?`)
+      .get(8453) as { seedCompleted: number | null } | undefined;
+    seedCompleted = Boolean(metaRow?.seedCompleted);
+  }
+
+  const now = Math.floor(Date.now() / 1000);
+  const minutesAgo = Math.max(0, (now - Number(cursor.lastTs)) / 60);
+
+  return {
+    lastBlock: Number(cursor.lastBlock),
+    lastTs: Number(cursor.lastTs),
+    minutesAgo: Number(minutesAgo.toFixed(1)),
+    seedCompleted
+  };
 }
 
 export type KPI = {
   label: string;
   value: number;
   change?: number;
+  format?: "currency" | "number";
 };
 
 export function getKpis(): KPI[] {
@@ -454,79 +1308,237 @@ export function getKpis(): KPI[] {
     )
     .get(cutoffDay) as { reward: number | null } | undefined;
 
-  const boostRow = db
-    .prepare(
-      `SELECT payloadJson
-       FROM locks
-       WHERE ts >= ?`
-    )
-    .all(cutoffDay) as { payloadJson: string }[];
+  const boostBalances = computeBoostBalances(db).values();
+  let openRisk = 0;
+  for (const entry of boostBalances) {
+    const outstanding = entry.sponsored > entry.unlocked ? entry.sponsored - entry.unlocked : 0n;
+    openRisk += Number(outstanding) / 1_000_000;
+  }
 
   const bankroll = microsToNumber(volumeRow?.net ?? 0);
   const pnlToday = microsToNumber(pnlRow?.reward ?? 0);
   const rewardsToday = pnlToday;
-  const openRisk = boostRow.reduce((acc, row) => acc + Number(sumPayloadAmounts(row.payloadJson)) / 1_000_000, 0);
 
   const out: KPI[] = [
-    { label: "Global Bankroll", value: bankroll },
-    { label: "Global PnL (24h)", value: pnlToday },
-    { label: "Global Rewards (24h)", value: rewardsToday },
-    { label: "Open Risk", value: openRisk }
+    { label: "Global Bankroll", value: bankroll, format: "currency" },
+    { label: "Global PnL (24h)", value: pnlToday, format: "currency" },
+    { label: "Global Rewards (24h)", value: rewardsToday, format: "currency" },
+    { label: "Open Risk", value: openRisk, format: "currency" }
   ];
 
   if (ME_ADDRESS) {
     const mySummary = getMySummary("24h");
     const total = mySummary.find((entry) => entry.bucket === "TOTAL");
     if (total) {
-      out.push({ label: "My Rewards (24h)", value: total.reward });
+      out.push({ label: "My Rewards (24h)", value: total.reward, format: "currency" });
     }
+  }
+
+  const idxStatus = getIndexerStatus();
+  if (idxStatus) {
+    out.push({ label: "Indexer mins behind", value: idxStatus.minutesAgo, format: "number" });
   }
 
   return out;
 }
 
+export type CompetitorMarketInsight = {
+  marketId: string;
+  title: string;
+  createdAt: number;
+  boostTotal: number;
+  ruleClarity: number | null;
+  sourceCount: number;
+  settlementRisk: number | null;
+};
+
 export type CompetitorEntry = {
   addr: string;
   name: string;
   xHandle: string | null;
-  markets: { marketId: string; title: string; createdAt: number; boostTotal: number }[];
+  reward14d: number;
+  efficiency: number;
+  overlapCount: number;
+  overlapMarkets: string[];
+  lastActiveTs: number | null;
+  typicalTradeSize: number | null;
+  claimRate: number | null;
+  netBoost: number;
+  recentMarketCount: number;
+  markets: CompetitorMarketInsight[];
+};
+
+export type GlobalSearchResult = {
+  type: "market" | "wallet";
+  id: string;
+  title: string;
+  subtitle?: string;
+  score: number;
+};
+
+export type SavedView = {
+  id: string;
+  label: string;
+  query?: string;
+  filters?: Record<string, unknown>;
+  createdAt?: number | null;
+  updatedAt?: number | null;
+};
+
+export function normalizeSavedViewQuery(query?: string | null): string {
+  if (!query) return "";
+  const trimmed = query.startsWith("?") ? query.slice(1) : query;
+  if (!trimmed) return "";
+  const params = new URLSearchParams(trimmed);
+  const map = new Map<string, string[]>();
+  for (const [key, value] of params.entries()) {
+    if (!map.has(key)) {
+      map.set(key, []);
+    }
+    map.get(key)!.push(value);
+  }
+  const normalized = new URLSearchParams();
+  const keys = Array.from(map.keys()).sort();
+  for (const key of keys) {
+    const values = map.get(key)!;
+    values.sort();
+    for (const value of values) {
+      normalized.append(key, value);
+    }
+  }
+  return normalized.toString();
+}
+
+type IndexerStatus = {
+  lastBlock: number;
+  lastTs: number;
+  minutesAgo: number;
+  seedCompleted: boolean;
 };
 
 export function getCompetitorWatch(): CompetitorEntry[] {
-  const top = getLeaderboard("14d", "total").slice(0, 3);
+  const top = getLeaderboard("14d", "total").slice(0, 5);
   const db = getDatabase();
+  const recentCutoff = rangeCutoff("30d");
+  const myMarkets = ME_ADDRESS ? collectAddressMarkets(db, ME_ADDRESS, recentCutoff) : new Set<string>();
+
+  const tradeStatsStmt = db.prepare(
+    `SELECT MAX(ts) AS lastTs,
+            AVG(ABS(CAST(usdcIn AS INTEGER) - CAST(usdcOut AS INTEGER))) AS avgNet
+     FROM trades
+     WHERE lower(trader) = ? AND ts >= ?`
+  );
+
+  const rewardStatsStmt = db.prepare(
+    `SELECT COUNT(*) AS claims,
+            SUM(CASE WHEN CAST(amount_usdc AS INTEGER) > 0 THEN 1 ELSE 0 END) AS positiveClaims,
+            MAX(block_time) AS lastClaim
+     FROM reward_claims
+     WHERE lower(wallet) = ? AND block_time >= ?`
+  );
+
+  const boostStatsStmt = db.prepare(
+    `SELECT MAX(ts) AS lastTs
+     FROM sponsored_locks
+     WHERE lower(user) = ? AND ts >= ?`
+  );
+
   const marketStmt = db.prepare(
     `SELECT marketId, metadata, createdAt
      FROM markets
      WHERE lower(creator) = ?
      ORDER BY createdAt DESC
-     LIMIT 5`
-  );
-  const boostStmt = db.prepare(
-    `SELECT payloadJson
-     FROM locks
-     WHERE marketId = ?`
+     LIMIT 6`
   );
 
+  const boostMap = computeBoostBalances(db);
+
   return top.map((entry) => {
-    const rows = marketStmt.all(entry.addr) as { marketId: string; metadata: string | null; createdAt: number | null }[];
-    const markets = rows.map((row) => {
-      const boosts = boostStmt.all(row.marketId) as { payloadJson: string }[];
-      const boostTotal = boosts.reduce((acc, b) => acc + Number(sumPayloadAmounts(b.payloadJson)) / 1_000_000, 0);
+    const competitorMarkets = collectAddressMarkets(db, entry.addr, recentCutoff);
+    const recentMarketSet = collectAddressMarkets(db, entry.addr, rangeCutoff("7d"));
+    const overlapMarkets = ME_ADDRESS ? [...competitorMarkets].filter((id) => myMarkets.has(id)) : [];
+    const overlapCount = overlapMarkets.length;
+
+    const tradeStats = tradeStatsStmt.get(entry.addr, recentCutoff) as { lastTs: number | null; avgNet: number | null } | undefined;
+    const rewardStats = rewardStatsStmt.get(entry.addr, recentCutoff) as {
+      claims: number | null;
+      positiveClaims: number | null;
+      lastClaim: number | null;
+    } | undefined;
+    const boostStats = boostStatsStmt.get(entry.addr, recentCutoff) as { lastTs: number | null } | undefined;
+
+    const avgNet = tradeStats?.avgNet ?? null;
+    const typicalTradeSize = avgNet != null ? dollars(microsToNumber(avgNet)) : null;
+    const claims = rewardStats?.claims ?? 0;
+    const positives = rewardStats?.positiveClaims ?? 0;
+    const claimRate = claims > 0 ? Number((positives / claims).toFixed(3)) : null;
+    const lastTrade = tradeStats?.lastTs ?? 0;
+    const lastBoost = boostStats?.lastTs ?? 0;
+    const lastClaim = rewardStats?.lastClaim ?? 0;
+    const lastActiveRaw = Math.max(lastTrade, lastBoost, lastClaim);
+    const lastActiveTs = lastActiveRaw > 0 ? lastActiveRaw : null;
+
+    const marketRows = marketStmt.all(entry.addr) as { marketId: string; metadata: string | null; createdAt: number | null }[];
+    const markets: CompetitorMarketInsight[] = marketRows.map((row) => {
+      const meta = interpretMetadata(row.metadata);
+      const boostEntry = boostMap.get(row.marketId) ?? { sponsored: 0n, unlocked: 0n };
+      const outstanding = boostEntry.sponsored > boostEntry.unlocked ? boostEntry.sponsored - boostEntry.unlocked : 0n;
+      const boostTotal = Number(outstanding) / 1_000_000;
+      const heuristics = meta.heuristics ?? analyzeMarketHeuristics(meta.ruleText ?? meta.raw ?? null, meta.sourceUrls ?? []);
       return {
         marketId: row.marketId,
-        title: deriveTitle(row.metadata) ?? row.marketId,
+        title: meta.title ?? row.marketId,
         createdAt: row.createdAt ?? 0,
-        boostTotal
+        boostTotal,
+        ruleClarity: heuristics.rule.clarityScore,
+        sourceCount: heuristics.sources.urls.length,
+        settlementRisk: heuristics.settlement.score
       };
     });
+
+    const netBoost = Number(markets.reduce((acc, market) => acc + market.boostTotal, 0).toFixed(2));
+
     return {
       addr: entry.addr,
       name: entry.name,
       xHandle: entry.xHandle,
+      reward14d: entry.reward,
+      efficiency: entry.efficiency,
+      overlapCount,
+      overlapMarkets: overlapMarkets.slice(0, 6),
+      lastActiveTs,
+      typicalTradeSize,
+      claimRate,
+      netBoost,
+      recentMarketCount: recentMarketSet.size,
       markets
-    };
+    } satisfies CompetitorEntry;
   });
+}
+
+type BoostEntry = { sponsored: bigint; unlocked: bigint };
+
+function computeBoostBalances(database: BetterSqliteDatabase): Map<string, BoostEntry> {
+  const rows = database
+    .prepare(
+      `SELECT marketId, type, payloadJson
+       FROM locks`
+    )
+    .all() as { marketId: string; type: string | null; payloadJson: string | null }[];
+
+  const map = new Map<string, BoostEntry>();
+  for (const row of rows) {
+    if (!row.marketId) continue;
+    const entry = map.get(row.marketId) ?? { sponsored: 0n, unlocked: 0n };
+    const kind = (row.type ?? "").toLowerCase();
+    if (kind === "sponsored") {
+      entry.sponsored += parseSponsoredAmount(row.payloadJson);
+    } else if (kind === "unlock" || kind === "unlocked") {
+      entry.unlocked += parseUnlockedAmount(row.payloadJson);
+    }
+    map.set(row.marketId, entry);
+  }
+  return map;
 }
 
 export type EventLogEntry = {
@@ -539,13 +1551,12 @@ export function getEventLog(limit = 50): EventLogEntry[] {
   const db = getDatabase();
   const rewardRows = db
     .prepare(
-      `SELECT ts, user, amount
-       FROM rewards
-       WHERE kind = 'claim'
-       ORDER BY ts DESC
+      `SELECT block_time AS ts, wallet, amount_usdc AS amount
+       FROM reward_claims
+       ORDER BY block_time DESC
        LIMIT ?`
     )
-    .all(limit) as { ts: number; user: string | null; amount: string | null }[];
+    .all(limit) as { ts: number; wallet: string | null; amount: string | null }[];
 
   const lockRows = db
     .prepare(
@@ -556,10 +1567,19 @@ export function getEventLog(limit = 50): EventLogEntry[] {
     )
     .all(limit) as { ts: number; user: string; type: string }[];
 
+  const tradeRows = db
+    .prepare(
+      `SELECT ts, marketId, trader, usdcIn, usdcOut
+       FROM trades
+       ORDER BY ts DESC
+       LIMIT ?`
+    )
+    .all(limit) as { ts: number; marketId: string; trader: string | null; usdcIn: string | null; usdcOut: string | null }[];
+
   const rewards = rewardRows.map<EventLogEntry>((row) => ({
     ts: row.ts,
     type: "reward",
-    description: `${shortenAddress(row.user ?? "-")} claimed $${microsToNumber(row.amount ?? 0).toFixed(2)}`
+    description: `${shortenAddress(row.wallet ?? "-")} claimed $${microsToNumber(row.amount ?? 0).toFixed(2)}`
   }));
 
   const locks = lockRows.map<EventLogEntry>((row) => ({
@@ -568,7 +1588,24 @@ export function getEventLog(limit = 50): EventLogEntry[] {
     description: `${shortenAddress(row.user)} ${row.type.toLowerCase()}`
   }));
 
-  return [...rewards, ...locks].sort((a, b) => b.ts - a.ts).slice(0, limit);
+  const trades = tradeRows
+    .map<EventLogEntry | null>((row) => {
+      const inAmount = microsToNumber(row.usdcIn ?? 0);
+      const outAmount = microsToNumber(row.usdcOut ?? 0);
+      const gross = inAmount + outAmount;
+      const net = outAmount - inAmount;
+      if (gross < 250) return null;
+      const direction = net >= 0 ? "sold" : "bought";
+      const size = gross >= 1000 ? gross.toFixed(0) : gross.toFixed(2);
+      return {
+        ts: row.ts,
+        type: "trade",
+        description: `${shortenAddress(row.trader ?? "?")} ${direction} ~$${size} on ${row.marketId}`
+      } satisfies EventLogEntry;
+    })
+    .filter(Boolean) as EventLogEntry[];
+
+  return [...rewards, ...locks, ...trades].sort((a, b) => b.ts - a.ts).slice(0, limit);
 }
 
 export function getErrorLog(): string[] {
@@ -655,6 +1692,9 @@ type MetadataInfo = {
   title?: string;
   cutoffTs?: number;
   raw?: string;
+  ruleText?: string | null;
+  sourceUrls?: string[];
+  heuristics?: MarketHeuristics;
 };
 
 function interpretMetadata(metadata?: string | null): MetadataInfo {
@@ -674,6 +1714,7 @@ function interpretMetadata(metadata?: string | null): MetadataInfo {
 
   const trimmed = decoded?.trim() ?? "";
   const info: MetadataInfo = {};
+  const sourceCandidates = new Set<string>();
   if (trimmed) {
     info.raw = trimmed;
   }
@@ -689,6 +1730,12 @@ function interpretMetadata(metadata?: string | null): MetadataInfo {
       if (title) info.title = title;
       const cutoff = resolveCutoffFromMeta(parsed);
       if (cutoff) info.cutoffTs = cutoff;
+      const rule = resolveRuleFromMeta(parsed);
+      if (rule) info.ruleText = rule;
+      const parsedSources = resolveSourcesFromMeta(parsed);
+      for (const url of parsedSources) {
+        sourceCandidates.add(url);
+      }
       if (!info.title && typeof parsed === "string" && parsed.trim().length > 0) {
         info.title = parsed.trim();
       }
@@ -702,6 +1749,25 @@ function interpretMetadata(metadata?: string | null): MetadataInfo {
     if (ts) info.cutoffTs = ts;
   }
 
+  if (!info.ruleText && trimmed) {
+    info.ruleText = trimmed;
+  }
+
+  if (info.raw) {
+    for (const url of extractUrlsFromText(info.raw)) {
+      sourceCandidates.add(url);
+    }
+  }
+
+  if (sourceCandidates.size > 0) {
+    info.sourceUrls = [...sourceCandidates];
+  } else {
+    info.sourceUrls = [];
+  }
+
+  const heuristicRule = info.ruleText ?? info.title ?? info.raw ?? null;
+  info.heuristics = analyzeMarketHeuristics(heuristicRule, info.sourceUrls);
+
   if (!info.title && trimmed) {
     info.title = trimmed;
   }
@@ -714,7 +1780,17 @@ function deriveTitle(metadata?: string | null): string | null {
   return info.title ?? info.raw ?? null;
 }
 
-const TITLE_KEYS = ["title", "question", "name", "prompt", "headline", "summary"];
+const TITLE_KEYS = [
+  "shorttext",
+  "title",
+  "text",
+  "question",
+  "name",
+  "prompt",
+  "headline",
+  "summary",
+  "description"
+];
 const TIME_KEYS = [
   "close",
   "closetime",
@@ -737,6 +1813,29 @@ const TIME_KEYS = [
   "cutoff",
   "cutoffts"
 ];
+
+const RULE_KEYS = [
+  "rule",
+  "rules",
+  "description",
+  "details",
+  "criteria",
+  "resolution",
+  "settlement",
+  "grading",
+  "adjudication"
+];
+
+const SOURCE_KEYS = [
+  "sources",
+  "links",
+  "references",
+  "citations",
+  "urls",
+  "feeds"
+];
+
+const URL_CAPTURE_REGEX = /https?:\/\/[^\s)"']+/gi;
 
 function resolveTitleFromMeta(value: unknown): string | undefined {
   return extractTitleFromMeta(value, new Set());
@@ -776,6 +1875,96 @@ function extractTitleFromMeta(value: unknown, seen: Set<unknown>): string | unde
   }
 
   return undefined;
+}
+
+function resolveRuleFromMeta(value: unknown): string | undefined {
+  return extractRuleFromMeta(value, new Set());
+}
+
+function extractRuleFromMeta(value: unknown, seen: Set<unknown>): string | undefined {
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    return trimmed.length > 0 ? trimmed : undefined;
+  }
+  if (!value || typeof value !== "object") return undefined;
+  if (seen.has(value)) return undefined;
+  seen.add(value);
+
+  if (Array.isArray(value)) {
+    for (const entry of value) {
+      const match = extractRuleFromMeta(entry, seen);
+      if (match) return match;
+    }
+    return undefined;
+  }
+
+  const obj = value as Record<string, unknown>;
+  for (const key of RULE_KEYS) {
+    if (key in obj) {
+      const match = extractRuleFromMeta(obj[key], seen);
+      if (match) return match;
+    }
+  }
+
+  for (const key of Object.keys(obj)) {
+    const match = extractRuleFromMeta(obj[key], seen);
+    if (match) return match;
+  }
+
+  return undefined;
+}
+
+function resolveSourcesFromMeta(value: unknown): string[] {
+  const out = new Set<string>();
+  collectSourcesFromMeta(value, new Set(), out);
+  return [...out];
+}
+
+function collectSourcesFromMeta(value: unknown, seen: Set<unknown>, out: Set<string>) {
+  if (!value) return;
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (isLikelyUrl(trimmed)) {
+      out.add(trimmed);
+    }
+    return;
+  }
+  if (typeof value !== "object") return;
+  if (seen.has(value)) return;
+  seen.add(value);
+
+  if (Array.isArray(value)) {
+    for (const entry of value) {
+      collectSourcesFromMeta(entry, seen, out);
+    }
+    return;
+  }
+
+  const obj = value as Record<string, unknown>;
+  for (const key of SOURCE_KEYS) {
+    if (key in obj) {
+      collectSourcesFromMeta(obj[key], seen, out);
+    }
+  }
+  for (const key of Object.keys(obj)) {
+    collectSourcesFromMeta(obj[key], seen, out);
+  }
+}
+
+function extractUrlsFromText(text: string): string[] {
+  const matches = text.match(URL_CAPTURE_REGEX) ?? [];
+  return matches.filter(isLikelyUrl);
+}
+
+function isLikelyUrl(value: string): boolean {
+  const trimmed = value.trim();
+  if (!trimmed) return false;
+  try {
+    const url = new URL(trimmed);
+    return url.protocol === "http:" || url.protocol === "https:";
+  } catch (error) {
+    return false;
+  }
 }
 
 function resolveCutoffFromMeta(value: unknown): number | undefined {
@@ -892,4 +2081,244 @@ function shortenAddress(address: string | null | undefined): string {
   if (!address) return "-";
   const lower = address.toLowerCase();
   return `${lower.slice(0, 6)}…${lower.slice(-4)}`;
+}
+
+export type WalletExposureRow = {
+  addr: string;
+  outstandingBoost: number;
+  boostPaid: number;
+  subsidy: number;
+  actualCost: number;
+  tradeVolume: number;
+  netCash: number;
+  marketsBoosted: number;
+  marketsTraded: number;
+  lastActivity: number | null;
+};
+
+export type BoostLedgerRow = {
+  marketId: string;
+  ts: number;
+  setsAmount: number;
+  userPaid: number;
+  subsidyUsed: number;
+  actualCost: number;
+  outcomes: number | null;
+};
+
+export function getWalletExposure(limit = 50): WalletExposureRow[] {
+  const dbInstance = getDatabase();
+
+  const lockAgg = dbInstance
+    .prepare(
+      `SELECT lower(locker) AS addr,
+              SUM(CASE WHEN lower(type) = 'lock'
+                       THEN CAST(json_extract(payloadJson, '$.total') AS INTEGER)
+                       ELSE 0 END) AS locked,
+              SUM(CASE WHEN lower(type) = 'unlock'
+                       THEN CAST(json_extract(payloadJson, '$.total') AS INTEGER)
+                       ELSE 0 END) AS unlocked,
+              MAX(ts) AS lastLockTs
+         FROM locks
+        WHERE locker IS NOT NULL
+        GROUP BY lower(locker)`
+    )
+    .all() as { addr: string; locked: number | null; unlocked: number | null; lastLockTs: number | null }[];
+
+  const sponsoredAgg = dbInstance
+    .prepare(
+      `SELECT lower(user) AS addr,
+              SUM(CAST(COALESCE(userPaid, '0') AS INTEGER)) AS paid,
+              SUM(CAST(COALESCE(subsidyUsed, '0') AS INTEGER)) AS subsidy,
+              SUM(CAST(COALESCE(actualCost, '0') AS INTEGER)) AS cost,
+              COUNT(DISTINCT marketId) AS markets,
+              MAX(ts) AS lastSponsoredTs
+         FROM sponsored_locks
+        WHERE user IS NOT NULL
+        GROUP BY lower(user)`
+    )
+    .all() as {
+      addr: string;
+      paid: number | null;
+      subsidy: number | null;
+      cost: number | null;
+      markets: number | null;
+      lastSponsoredTs: number | null;
+    }[];
+
+  const tradeAgg = dbInstance
+    .prepare(
+      `SELECT lower(trader) AS addr,
+              SUM(CAST(usdcIn AS INTEGER) - CAST(usdcOut AS INTEGER)) AS netCash,
+              SUM(CAST(usdcIn AS INTEGER) + CAST(usdcOut AS INTEGER)) AS volume,
+              COUNT(DISTINCT marketId) AS markets,
+              MAX(ts) AS lastTradeTs
+         FROM trades
+        WHERE trader IS NOT NULL
+        GROUP BY lower(trader)`
+    )
+    .all() as {
+      addr: string;
+      netCash: number | null;
+      volume: number | null;
+      markets: number | null;
+      lastTradeTs: number | null;
+    }[];
+
+  const map = new Map<string, {
+    addr: string;
+    locked: number;
+    unlocked: number;
+    lastActivity: number;
+    boostPaid: number;
+    subsidy: number;
+    cost: number;
+    marketsBoosted: number;
+    netCash: number;
+    tradeVolume: number;
+    marketsTraded: number;
+  }>();
+
+  for (const row of lockAgg) {
+    const locked = Number(row.locked ?? 0);
+    const unlocked = Number(row.unlocked ?? 0);
+    const last = row.lastLockTs != null ? Number(row.lastLockTs) : 0;
+    const entry = map.get(row.addr) ?? {
+      addr: row.addr,
+      locked: 0,
+      unlocked: 0,
+      lastActivity: 0,
+      boostPaid: 0,
+      subsidy: 0,
+      cost: 0,
+      marketsBoosted: 0,
+      netCash: 0,
+      tradeVolume: 0,
+      marketsTraded: 0
+    };
+    entry.locked += locked;
+    entry.unlocked += unlocked;
+    entry.lastActivity = Math.max(entry.lastActivity, last);
+    map.set(row.addr, entry);
+  }
+
+  for (const row of sponsoredAgg) {
+    const entry = map.get(row.addr) ?? {
+      addr: row.addr,
+      locked: 0,
+      unlocked: 0,
+      lastActivity: 0,
+      boostPaid: 0,
+      subsidy: 0,
+      cost: 0,
+      marketsBoosted: 0,
+      netCash: 0,
+      tradeVolume: 0,
+      marketsTraded: 0
+    };
+    entry.boostPaid += Number(row.paid ?? 0);
+    entry.subsidy += Number(row.subsidy ?? 0);
+    entry.cost += Number(row.cost ?? 0);
+    entry.marketsBoosted = Math.max(entry.marketsBoosted, Number(row.markets ?? 0));
+    entry.lastActivity = Math.max(entry.lastActivity, Number(row.lastSponsoredTs ?? 0));
+    map.set(row.addr, entry);
+  }
+
+  for (const row of tradeAgg) {
+    const entry = map.get(row.addr) ?? {
+      addr: row.addr,
+      locked: 0,
+      unlocked: 0,
+      lastActivity: 0,
+      boostPaid: 0,
+      subsidy: 0,
+      cost: 0,
+      marketsBoosted: 0,
+      netCash: 0,
+      tradeVolume: 0,
+      marketsTraded: 0
+    };
+    entry.netCash += Number(row.netCash ?? 0);
+    entry.tradeVolume += Number(row.volume ?? 0);
+    entry.marketsTraded = Math.max(entry.marketsTraded, Number(row.markets ?? 0));
+    entry.lastActivity = Math.max(entry.lastActivity, Number(row.lastTradeTs ?? 0));
+    map.set(row.addr, entry);
+  }
+
+  const microsToFloat = (value: number) => Number((value / 1_000_000).toFixed(2));
+
+  return [...map.values()]
+    .map((entry) => {
+      const outstandingMicros = Math.max(0, entry.locked - entry.unlocked);
+      const outstandingBoost = microsToFloat(outstandingMicros);
+      const boostPaid = microsToFloat(entry.boostPaid);
+      const subsidy = microsToFloat(entry.subsidy);
+      const actualCost = microsToFloat(entry.cost);
+      const tradeVolume = microsToFloat(entry.tradeVolume);
+      const netCash = microsToFloat(entry.netCash);
+      const lastActivity = entry.lastActivity > 0 ? entry.lastActivity : null;
+      return {
+        addr: entry.addr,
+        outstandingBoost,
+        boostPaid,
+        subsidy,
+        actualCost,
+        tradeVolume,
+        netCash,
+        marketsBoosted: entry.marketsBoosted,
+        marketsTraded: entry.marketsTraded,
+        lastActivity
+      } satisfies WalletExposureRow;
+    })
+    .filter((row) => row.outstandingBoost > 0 || row.boostPaid > 0 || row.tradeVolume > 0)
+    .sort((a, b) => b.outstandingBoost - a.outstandingBoost || b.tradeVolume - a.tradeVolume)
+    .slice(0, limit);
+}
+
+export function getBoostLedger(address: string, limit = 40): BoostLedgerRow[] {
+  const dbInstance = getDatabase();
+  const normalized = address.toLowerCase();
+  const rows = dbInstance
+    .prepare(
+      `SELECT marketId,
+              ts,
+              setsAmount,
+              userPaid,
+              subsidyUsed,
+              actualCost,
+              outcomes
+         FROM sponsored_locks
+        WHERE lower(user) = ?
+        ORDER BY ts DESC
+        LIMIT ?`
+    )
+    .all(normalized, limit) as {
+      marketId: string;
+      ts: number;
+      setsAmount: string | null;
+      userPaid: string | null;
+      subsidyUsed: string | null;
+      actualCost: string | null;
+      outcomes: number | null;
+    }[];
+
+  const toNumber = (value: string | null) => {
+    if (!value) return 0;
+    try {
+      return Number(BigInt(value)) / 1_000_000;
+    } catch (error) {
+      const parsed = Number(value);
+      return Number.isFinite(parsed) ? parsed / 1_000_000 : 0;
+    }
+  };
+
+  return rows.map((row) => ({
+    marketId: row.marketId,
+    ts: row.ts,
+    setsAmount: Number(toNumber(row.setsAmount).toFixed(2)),
+    userPaid: Number(toNumber(row.userPaid).toFixed(2)),
+    subsidyUsed: Number(toNumber(row.subsidyUsed).toFixed(2)),
+    actualCost: Number(toNumber(row.actualCost).toFixed(2)),
+    outcomes: row.outcomes
+  }));
 }

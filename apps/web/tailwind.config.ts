@@ -1,7 +1,6 @@
 import type { Config } from "tailwindcss";
 
 const config: Config = {
-  darkMode: ["class", '[data-theme="dark"]'],
   content: ["./app/**/*.{ts,tsx}", "./components/**/*.{ts,tsx}"],
   theme: {
     extend: {
@@ -19,7 +18,17 @@ const config: Config = {
         accent: "hsl(var(--bk-accent))",
         success: "hsl(var(--bk-success))",
         warning: "hsl(var(--bk-warning))",
-        danger: "hsl(var(--bk-danger))"
+        danger: "hsl(var(--bk-danger))",
+        brand: {
+          bg: "hsl(var(--bk-brand-bg))",
+          panel: "hsl(var(--bk-brand-panel))",
+          surface: "hsl(var(--bk-brand-surface))",
+          ring: "hsl(var(--bk-brand-ring))",
+          muted: "hsl(var(--bk-brand-muted))",
+          text: "hsl(var(--bk-brand-text))",
+          blue: "hsl(var(--bk-brand-blue))",
+          orange: "hsl(var(--bk-brand-orange))"
+        }
       },
       borderRadius: {
         DEFAULT: "var(--bk-radius)",

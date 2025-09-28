@@ -6,7 +6,15 @@ import { formatMoney } from "@/lib/fmt";
 
 const RANGES: LeaderboardRange[] = ["24h", "7d", "14d", "30d", "ytd", "all"];
 
-export function PnLTable({ initialRows, initialRange }: { initialRows: PnlRow[]; initialRange: LeaderboardRange }) {
+export function PnLTable({
+  dense = false,
+  initialRows,
+  initialRange
+}: {
+  dense?: boolean;
+  initialRows: PnlRow[];
+  initialRange: LeaderboardRange;
+}) {
   const [rows, setRows] = useState(initialRows);
   const allowedRanges = new Set<LeaderboardRange>(RANGES);
   const safeInitialRange = allowedRanges.has(initialRange) ? initialRange : "14d";
@@ -32,12 +40,16 @@ export function PnLTable({ initialRows, initialRange }: { initialRows: PnlRow[];
     });
   }, [range]);
 
+  const pad = dense ? "bk-px-2 bk-py-1.5" : "bk-px-3 bk-py-2";
+  const tableText = dense ? "bk-text-xs" : "bk-text-sm";
+  const tableMinWidth = dense ? "bk-min-w-[600px]" : "";
+
   return (
-    <section className="bk-rounded-lg bk-bg-surface bk-ring-1 bk-ring-border bk-shadow-sm bk-p-4 bk-space-y-3">
+    <section className="bk-rounded-2xl bk-bg-brand-panel bk-ring-1 bk-ring-brand-ring/60 bk-p-5 bk-space-y-3">
       <header className="bk-flex bk-items-center bk-justify-between">
         <div>
-          <h2 className="bk-text-sm bk-uppercase bk-tracking-widest bk-text-muted">PnL</h2>
-          <p className="bk-text-xs bk-text-muted">Net rewards + flows</p>
+          <h2 className="bk-text-sm bk-text-brand-muted">Profit and loss</h2>
+          <p className="bk-text-xs bk-text-brand-muted">Net rewards and trade flows</p>
         </div>
         <div className="bk-flex bk-gap-2">
           {RANGES.map((value) => {
@@ -45,8 +57,8 @@ export function PnLTable({ initialRows, initialRange }: { initialRows: PnlRow[];
             return (
             <button
               key={value}
-              className={`bk-rounded-full bk-px-3 bk-py-1 bk-text-xs bk-uppercase bk-tracking-widest ${
-                range === value ? "bk-bg-accent bk-text-bg" : "bk-bg-surface2 bk-text-muted"
+              className={`bk-rounded-full bk-px-3 bk-py-1.5 bk-text-xs bk-font-medium ${
+                range === value ? "bk-bg-brand-orange bk-text-black" : "bk-bg-brand-surface bk-text-brand-muted hover:bk-text-brand-text"
               }`}
               onClick={() => setRange(value)}
             >
@@ -55,39 +67,75 @@ export function PnLTable({ initialRows, initialRange }: { initialRows: PnlRow[];
           );})}
         </div>
       </header>
-      <div className="bk-border bk-border-border bk-rounded-xl bk-divide-y bk-divide-border/60">
-        <div className="bk-grid bk-grid-cols-[3rem,1fr,7rem,7rem,7rem] bk-text-xs bk-uppercase bk-tracking-widest bk-text-muted bk-px-3 bk-py-2">
-          <div>#</div>
-          <div>Wallet</div>
-          <div>Rewards</div>
-          <div>Net Flow</div>
-          <div>PnL</div>
-        </div>
-        {rows.map((row, idx) => (
-          <div key={row.addr} className="bk-grid bk-grid-cols-[3rem,1fr,7rem,7rem,7rem] bk-items-center bk-px-3 bk-py-2 bk-hover:bg-surface2">
-            <div className="bk-text-muted">{idx + 1}</div>
-            <div className="bk-flex bk-items-center bk-gap-2">
-              <a href={`https://context.markets/u/${row.addr}`} target="_blank" rel="noreferrer" className="bk-text-accent">
-                {row.name}
-              </a>
-              {row.xHandle && (
-                <a href={`https://twitter.com/${row.xHandle}`} target="_blank" rel="noreferrer" className="bk-text-muted">
-                  @{row.xHandle}
-                </a>
-              )}
-            </div>
-            <div className="bk-text-right bk-tabular-nums">{formatMoney(row.reward)}</div>
-            <div className={`bk-text-right bk-tabular-nums ${row.netFlow >= 0 ? "bk-text-success" : "bk-text-danger"}`}>
-              {formatMoney(row.netFlow)}
-            </div>
-            <div className={`bk-text-right bk-tabular-nums ${row.pnl >= 0 ? "bk-text-success" : "bk-text-danger"}`}>
-              {formatMoney(row.pnl)}
-            </div>
-          </div>
-        ))}
-        {rows.length === 0 && <p className="bk-px-3 bk-py-4 bk-text-sm bk-text-muted">No wallets yet.</p>}
+      <div className="bk-border bk-border-brand-ring/60 bk-rounded-xl bk-overflow-auto">
+        <table className={`bk-w-full ${tableText} ${tableMinWidth}`.trim()}>
+          <thead className="bk-sticky bk-top-14 bk-z-10 bk-bg-brand-panel">
+            <tr className="bk-text-xs bk-text-brand-muted">
+              <th
+                className={`bk-w-12 bk-text-left bk-font-normal ${pad} bk-sticky sm:bk-static bk-left-0 bk-z-20 bk-bg-brand-panel`}
+              >
+                #
+              </th>
+              <th
+                className={`bk-w-[220px] bk-text-left bk-font-normal ${pad} bk-sticky sm:bk-static bk-left-12 bk-z-20 bk-bg-brand-panel`}
+              >
+                Wallet
+              </th>
+              <th className={`bk-text-right bk-font-normal ${pad}`}>Rewards</th>
+              <th className={`bk-text-right bk-font-normal ${pad}`}>Net flow</th>
+              <th className={`bk-text-right bk-font-normal ${pad}`}>PnL</th>
+            </tr>
+          </thead>
+          <tbody className="bk-divide-y bk-divide-brand-ring/40">
+            {rows.map((row, idx) => (
+              <tr key={row.addr} className="hover:bk-bg-brand-surface/60">
+                <td
+                  className={`bk-w-12 bk-text-brand-muted ${pad} bk-sticky sm:bk-static bk-left-0 bk-z-10 bk-bg-brand-panel`}
+                >
+                  {idx + 1}
+                </td>
+                <td
+                  className={`bk-w-[220px] ${pad} bk-sticky sm:bk-static bk-left-12 bk-z-10 bk-bg-brand-panel`}
+                >
+                  <div className="bk-flex bk-items-center bk-gap-2">
+                    <a href={`https://context.markets/u/${row.addr}`} target="_blank" rel="noreferrer" className="bk-text-brand-blue">
+                      {row.name}
+                    </a>
+                    {row.xHandle && (
+                      <a href={`https://twitter.com/${row.xHandle}`} target="_blank" rel="noreferrer" className="bk-text-brand-muted">
+                        @{row.xHandle}
+                      </a>
+                    )}
+                  </div>
+                </td>
+                <td className={`bk-text-right bk-tabular-nums ${pad}`}>{formatMoney(row.reward)}</td>
+                <td
+                  className={`bk-text-right bk-tabular-nums ${pad} ${
+                    row.netFlow >= 0 ? "bk-text-brand-blue" : "bk-text-brand-orange"
+                  }`}
+                >
+                  {formatMoney(row.netFlow)}
+                </td>
+                <td
+                  className={`bk-text-right bk-tabular-nums ${pad} ${
+                    row.pnl >= 0 ? "bk-text-brand-blue" : "bk-text-brand-orange"
+                  }`}
+                >
+                  {formatMoney(row.pnl)}
+                </td>
+              </tr>
+            ))}
+            {rows.length === 0 && (
+              <tr>
+                <td colSpan={5} className={`${pad} bk-text-sm bk-text-brand-muted`}>
+                  No wallets yet.
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
       </div>
-      {isPending && <p className="bk-text-xs bk-text-muted">Updating…</p>}
+      {isPending && <p className="bk-text-xs bk-text-brand-muted">Updating…</p>}
     </section>
   );
 }

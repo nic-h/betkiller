@@ -32,10 +32,10 @@ export async function GET(request: Request) {
   const hasSponsoredLocks = hasTable("sponsored_locks");
 
   const rewardsCTE = hasRewards
-    ? `SELECT lower(user) AS addr, SUM(CAST(amount AS INTEGER)) AS rewards
+    ? `SELECT lower(wallet) AS addr, SUM(CAST(amount_usdc AS INTEGER)) AS rewards
        FROM reward_claims
-       WHERE ts >= ?
-       GROUP BY lower(user)`
+       WHERE block_time >= ?
+       GROUP BY lower(wallet)`
     : `SELECT NULL AS addr, 0 AS rewards`;
 
   const redeemsCTE = hasRedeems

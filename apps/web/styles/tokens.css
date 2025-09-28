@@ -11,6 +11,16 @@
   --bk-accent-600: 206 100% 48%;
   --bk-accent-700: 206 100% 41%;
 
+  /* brand aliases */
+  --bk-brand-bg: var(--bk-bg);
+  --bk-brand-panel: var(--bk-surface);
+  --bk-brand-surface: var(--bk-surface-2);
+  --bk-brand-ring: var(--bk-border);
+  --bk-brand-muted: var(--bk-muted);
+  --bk-brand-text: var(--bk-text);
+  --bk-brand-blue: var(--bk-accent);
+  --bk-brand-orange: var(--bk-warning);
+
   --bk-success: 152 65% 45%;
   --bk-warning: 41 95% 50%;
   --bk-danger: 2 86% 57%;
@@ -52,17 +62,4 @@
   /* elevation */
   --bk-shadow-sm: 0 1px 0 hsl(var(--bk-border) / 0.9), 0 1px 8px hsl(0 0% 0% / 0.2);
   --bk-shadow: 0 1px 0 hsl(var(--bk-border) / 0.9), 0 6px 24px hsl(0 0% 0% / 0.35);
-}
-
-:root[data-theme="light"] {
-  --bk-bg: 0 0% 100%;
-  --bk-surface: 0 0% 99%;
-  --bk-surface-2: 0 0% 97%;
-  --bk-border: 0 0% 86%;
-  --bk-muted: 0 0% 38%;
-  --bk-text: 0 0% 10%;
-
-  --bk-accent: 206 100% 48%;
-  --bk-accent-600: 206 100% 41%;
-  --bk-accent-700: 206 100% 35%;
 }

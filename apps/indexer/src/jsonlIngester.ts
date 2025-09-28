@@ -11,9 +11,9 @@ import {
   flushPendingMarketStates,
   flushProfiles,
   handleMarketLog,
-  handleVaultLog,
-  handleRewardDistributorLog
+  handleVaultLog
 } from './handlers.js';
+import { handleRewardDistributorLog } from './handlers/rewards.js';
 import { env } from './env.js';
 
 const LOG_FILE = getLogsFilePath();

@@ -8,7 +8,6 @@ import {
   insertRedemption,
   insertTrade,
   insertRewardEvent,
-  insertRewardClaim,
   insertStakeEvent,
   insertSponsoredLock,
   marketExists,
@@ -19,8 +18,8 @@ import { env } from "./env.js";
 
 const marketInterface = new Interface(predictionMarketAbi as any);
 const vaultInterface = new Interface(vaultAbi as any);
-const rewardDistributorInterface = new Interface(rewardDistributorAbi as any);
-const erc20Interface = new Interface([
+export const rewardDistributorInterface = new Interface(rewardDistributorAbi as any);
+export const erc20Interface = new Interface([
   "event Transfer(address indexed from, address indexed to, uint256 value)"
 ]);
 
@@ -39,7 +38,7 @@ const blockRequestQueue: Array<() => void> = [];
 const ZERO_HEX_32 = "0x0000000000000000000000000000000000000000000000000000000000000000";
 const ZERO_TX_HASH = ZERO_HEX_32;
 
-function normalizeEpochId(value: any): string {
+export function normalizeEpochId(value: any): string {
   if (value === undefined || value === null) return "";
   const raw = value?.toString?.() ?? String(value);
   if (!raw) return "";
@@ -50,7 +49,7 @@ function normalizeEpochId(value: any): string {
   }
 }
 
-function normalizeHex(value: any): `0x${string}` | undefined {
+export function normalizeHex(value: any): `0x${string}` | undefined {
   if (value === undefined || value === null) return undefined;
   let str = String(value).trim();
   if (!str) return undefined;
@@ -64,7 +63,7 @@ function normalizeHex(value: any): `0x${string}` | undefined {
   return str.toLowerCase() as `0x${string}`;
 }
 
-function normalizeTxHash(value: any): string {
+export function normalizeTxHash(value: any): string {
   return normalizeHex(value) ?? ZERO_TX_HASH;
 }
 
@@ -164,7 +163,7 @@ async function fetchBlockTimestamp(provider: JsonRpcProvider, blockNumber: numbe
   throw new Error(`getBlock rate-limited too long at ${blockNumber}`);
 }
 
-function enqueueProfile(addr: string | undefined) {
+export function enqueueProfile(addr: string | undefined) {
   if (!SHOULD_SCRAPE_PROFILES) return;
   if (!addr) return;
   try {
@@ -175,7 +174,7 @@ function enqueueProfile(addr: string | undefined) {
   }
 }
 
-async function blockTimestamp(provider: JsonRpcProvider, blockNumber: number): Promise<number> {
+export async function blockTimestamp(provider: JsonRpcProvider, blockNumber: number): Promise<number> {
   if (blockTimestampCache.has(blockNumber)) {
     return blockTimestampCache.get(blockNumber)!;
   }
@@ -196,7 +195,7 @@ async function blockTimestamp(provider: JsonRpcProvider, blockNumber: number): P
   }
 }
 
-function toLower(value: string | undefined | null): string | undefined {
+export function toLower(value: string | undefined | null): string | undefined {
   return value ? value.toLowerCase() : undefined;
 }
 
@@ -385,74 +384,6 @@ export async function handleVaultLog(provider: JsonRpcProvider, log: Log) {
         blockNumber: blockNum,
         ts
       });
-      break;
-    }
-    default:
-      break;
-  }
-}
-
-export async function handleRewardTransferLog(provider: JsonRpcProvider, log: Log) {
-  let parsed: any;
-  try {
-    parsed = erc20Interface.parseLog(log as any) as any;
-  } catch (error) {
-    return;
-  }
-
-  const fromAddr = toLower(parsed?.args?.from);
-  const toAddr = toLower(parsed?.args?.to);
-  if (!fromAddr || !toAddr) return;
-
-  const blockNum = typeof log.blockNumber === "number" ? log.blockNumber : Number(log.blockNumber ?? 0);
-  const ts = await blockTimestamp(provider, blockNum);
-  const amount = BigInt(parsed?.args?.value?.toString?.() ?? parsed?.args?.value ?? 0n);
-
-  insertRewardClaim({
-    txHash: normalizeTxHash(log.transactionHash),
-    logIndex: Number((log as any).logIndex ?? (log as any).index ?? 0),
-    ts,
-    user: toAddr,
-    amount
-  });
-  enqueueProfile(toAddr);
-}
-
-export async function handleRewardDistributorLog(provider: JsonRpcProvider, log: Log) {
-  let parsed: any;
-  try {
-    parsed = rewardDistributorInterface.parseLog(log as any);
-  } catch (error) {
-    return;
-  }
-
-  const eventName = parsed?.name ?? parsed?.fragment?.name;
-  if (!eventName) return;
-
-  const blockNum = typeof log.blockNumber === "number" ? log.blockNumber : Number(log.blockNumber ?? 0);
-  const ts = await blockTimestamp(provider, blockNum);
-  const epochIdRaw = parsed?.args?.epochId ?? parsed?.args?.epochID;
-  const epochId = normalizeEpochId(epochIdRaw);
-
-  switch (eventName) {
-    case "EpochRootSet": {
-      const root = parsed?.args?.merkleRoot ? String(parsed.args.merkleRoot) : null;
-      insertRewardEvent({ ts, kind: "root", epochId, root });
-      break;
-    }
-    case "RewardClaimed": {
-      const user = toLower(parsed?.args?.user);
-      if (!user) break;
-      const amount = BigInt(parsed?.args?.amount?.toString?.() ?? parsed?.args?.amount ?? 0n);
-      insertRewardEvent({ ts, kind: "claim", epochId, user, amount });
-      insertRewardClaim({
-        txHash: normalizeTxHash(log.transactionHash),
-        logIndex: Number((log as any).logIndex ?? (log as any).index ?? 0),
-        ts,
-        user,
-        amount
-      });
-      enqueueProfile(user);
       break;
     }
     default:

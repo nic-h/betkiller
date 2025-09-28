@@ -2,16 +2,14 @@ import 'dotenv/config';
 import { JsonRpcProvider, Log } from 'ethers';
 import { env } from './env.js';
 import { db, getIndexerCursor, setIndexerCursor } from './db.js';
-import {
-  handleRewardTransferLog,
-  flushProfiles,
-  flushPendingMarketStates,
-  queueResnapshotForActiveMarkets,
-  TRANSFER_TOPIC
-} from './handlers.js';
+import { flushProfiles, flushPendingMarketStates, queueResnapshotForActiveMarkets, TRANSFER_TOPIC } from './handlers.js';
+import { handleRewardTransferLog } from './handlers/rewards.js';
 import { appendStoredLogs, serializeLog, type StoredLog } from './logStore.js';
 import { ingestJsonLogs, bootstrapFromExisting } from './jsonlIngester.js';
 import { ensureSeedOnce } from './seed.js';
+import { startHttpServer } from './server/index.js';
+import { scheduleMentionSync } from './mentionsIngester.js';
+import { syncMarketHeuristicsSnapshots } from './heuristicsSnapshot.js';
 
 const RPCS = (process.env.RPC_URLS || process.env.RPC_URL || '')
   .split('|')
@@ -183,6 +181,13 @@ async function maybeResnapshot(provider: JsonRpcProvider) {
   try {
     await queueResnapshotForActiveMarkets();
     await flushPendingMarketStates(provider);
+    await syncMarketHeuristicsSnapshots((message, extra) => {
+      if (extra !== undefined) {
+        console.log(message, extra);
+      } else {
+        console.log(message);
+      }
+    });
   } catch (error) {
     console.warn('nightly_resnapshot_failed', error);
   } finally {
@@ -229,12 +234,20 @@ async function follow() {
 }
 
 async function start() {
+  startHttpServer();
   await ensureSeedOnce({
     chainId: CHAIN_ID,
     backfillDays: BACKFILL_DAYS,
     confirmations: CONFIRMATIONS,
     provider,
     log: (...args) => console.log(...args)
+  });
+  scheduleMentionSync((message, extra) => {
+    if (extra !== undefined) {
+      console.log(message, extra);
+    } else {
+      console.log(message);
+    }
   });
   const seededCursor = getLastBlock();
   setMeta('lastBlock', seededCursor);
