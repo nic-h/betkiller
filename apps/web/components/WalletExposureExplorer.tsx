@@ -76,81 +76,90 @@ export function WalletExposureExplorer({
         </button>
       </header>
       <div className="bk-grid bk-grid-cols-1 xl:bk-grid-cols-2 bk-gap-4">
-        <div className="bk-space-y-2">
-          <table className="bk-w-full bk-text-xs bk-text-brand-muted">
-            <thead>
-              <tr className="bk-text-2xs bk-uppercase bk-text-brand-muted">
-                <th className="bk-text-left bk-font-medium">Wallet</th>
-                <th className="bk-text-right bk-font-medium">Outstanding</th>
-                <th className="bk-text-right bk-font-medium">Paid</th>
-                <th className="bk-text-right bk-font-medium">Subsidy</th>
-                <th className="bk-text-right bk-font-medium">Volume</th>
-              </tr>
-            </thead>
-            <tbody>
-              {exposureRows.map((row) => {
-                const isActive = row.addr === activeAddress;
-                return (
-                  <tr
-                    key={row.addr}
-                    className={`bk-cursor-pointer hover:bk-bg-brand-ring/30 ${isActive ? "bk-bg-brand-ring/30" : ""}`}
-                    onClick={() => selectAddress(row.addr)}
-                  >
-                    <td className="bk-py-2 bk-pr-2 bk-font-mono bk-text-brand-text">{row.addr}</td>
-                    <td className="bk-text-right bk-py-2">{formatMoney(row.outstandingBoost)}</td>
-                    <td className="bk-text-right bk-py-2">{formatMoney(row.boostPaid)}</td>
-                    <td className="bk-text-right bk-py-2">{formatMoney(row.subsidy)}</td>
-                    <td className="bk-text-right bk-py-2">{formatMoney(row.tradeVolume)}</td>
-                  </tr>
-                );
-              })}
-              {exposureRows.length === 0 && (
-                <tr>
-                  <td colSpan={5} className="bk-py-4 bk-text-center">No boost activity captured yet.</td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-        </div>
-        <div className="bk-space-y-3">
+        <div className="bk-rounded-2xl bk-bg-brand-surface bk-border bk-border-brand-ring/40 bk-p-4 bk-space-y-3">
           <div className="bk-flex bk-items-center bk-justify-between">
-            <h3 className="bk-text-xs bk-text-brand-muted">Boost ledger</h3>
+            <span className="bk-text-xs bk-text-brand-muted">Wallets</span>
+            {loadingExposure && <span className="bk-text-2xs bk-text-brand-muted">Refreshing…</span>}
+          </div>
+          <div className="bk-max-h-[360px] bk-overflow-auto bk-rounded-xl bk-border bk-border-brand-ring/30">
+            <table className="bk-w-full bk-text-xs bk-text-brand-muted bk-table-fixed">
+              <thead className="bk-sticky bk-top-0 bk-bg-brand-surface">
+                <tr className="bk-text-2xs bk-uppercase bk-text-brand-muted">
+                  <th className="bk-text-left bk-font-medium bk-px-3 bk-py-2">Wallet</th>
+                  <th className="bk-text-right bk-font-medium bk-px-3 bk-py-2">Outstanding</th>
+                  <th className="bk-text-right bk-font-medium bk-px-3 bk-py-2">Paid</th>
+                  <th className="bk-text-right bk-font-medium bk-px-3 bk-py-2">Subsidy</th>
+                  <th className="bk-text-right bk-font-medium bk-px-3 bk-py-2">Volume</th>
+                </tr>
+              </thead>
+              <tbody>
+                {exposureRows.map((row) => {
+                  const isActive = row.addr === activeAddress;
+                  return (
+                    <tr
+                      key={row.addr}
+                      className={`bk-cursor-pointer hover:bk-bg-brand-blue/10 ${isActive ? "bk-bg-brand-blue/15" : ""}`}
+                      onClick={() => selectAddress(row.addr)}
+                    >
+                      <td className="bk-px-3 bk-py-2 bk-font-mono bk-text-brand-text bk-break-all">{row.addr}</td>
+                      <td className="bk-text-right bk-px-3 bk-py-2">{formatMoney(row.outstandingBoost)}</td>
+                      <td className="bk-text-right bk-px-3 bk-py-2">{formatMoney(row.boostPaid)}</td>
+                      <td className="bk-text-right bk-px-3 bk-py-2">{formatMoney(row.subsidy)}</td>
+                      <td className="bk-text-right bk-px-3 bk-py-2">{formatMoney(row.tradeVolume)}</td>
+                    </tr>
+                  );
+                })}
+                {exposureRows.length === 0 && (
+                  <tr>
+                    <td colSpan={5} className="bk-px-3 bk-py-6 bk-text-center">No boost activity captured yet.</td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+        <div className="bk-rounded-2xl bk-bg-brand-surface bk-border bk-border-brand-ring/40 bk-p-4 bk-space-y-3">
+          <div className="bk-flex bk-items-center bk-justify-between">
+            <div>
+              <h3 className="bk-text-xs bk-text-brand-muted">Boost ledger</h3>
+              {activeAddress ? (
+                <p className="bk-text-2xs bk-text-brand-muted bk-font-mono bk-break-all">{activeAddress}</p>
+              ) : (
+                <p className="bk-text-2xs bk-text-brand-muted">Select a wallet to inspect ledger activity.</p>
+              )}
+            </div>
             {loadingLedger && <span className="bk-text-2xs bk-text-brand-muted">Loading…</span>}
           </div>
-          <div className="bk-space-y-2 bk-text-xs bk-text-brand-muted">
-            {activeAddress ? (
-              <p className="bk-text-2xs bk-text-brand-muted">{activeAddress}</p>
-            ) : (
-              <p className="bk-text-2xs bk-text-brand-muted">Select a wallet to inspect ledger activity.</p>
+          <div className="bk-max-h-[360px] bk-overflow-auto bk-space-y-2">
+            {ledgerRows.map((entry) => (
+              <div
+                key={`${entry.marketId}-${entry.ts}`}
+                className="bk-rounded-xl bk-border bk-border-brand-ring/30 bk-bg-brand-panel bk-p-3 bk-space-y-2"
+              >
+                <div className="bk-flex bk-items-center bk-justify-between">
+                  <a
+                    href={`https://context.markets/markets/${entry.marketId}`}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="bk-text-brand-blue hover:bk-text-brand-text"
+                  >
+                    {entry.marketId}
+                  </a>
+                  <span className="bk-text-2xs bk-text-brand-muted">{new Date(entry.ts * 1000).toLocaleString()}</span>
+                </div>
+                <div className="bk-grid bk-grid-cols-2 bk-gap-2 bk-text-2xs bk-text-brand-muted">
+                  <Metric label="Sets" value={formatMoney(entry.setsAmount)} />
+                  <Metric label="Paid" value={formatMoney(entry.userPaid)} />
+                  <Metric label="Subsidy" value={formatMoney(entry.subsidyUsed)} />
+                  <Metric label="Actual" value={formatMoney(entry.actualCost)} />
+                </div>
+              </div>
+            ))}
+            {ledgerRows.length === 0 && activeAddress && (
+              <div className="bk-rounded-xl bk-border bk-border-brand-ring/30 bk-bg-brand-panel bk-p-3 bk-text-2xs bk-text-brand-muted">
+                No boost events recorded for this wallet.
+              </div>
             )}
-            <ul className="bk-space-y-2">
-              {ledgerRows.map((entry) => (
-                <li key={`${entry.marketId}-${entry.ts}`} className="bk-rounded-xl bk-border bk-border-brand-ring/30 bk-bg-brand-surface bk-p-3">
-                  <div className="bk-flex bk-items-center bk-justify-between">
-                    <a
-                      href={`https://context.markets/markets/${entry.marketId}`}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="bk-text-brand-text hover:bk-text-brand-blue"
-                    >
-                      {entry.marketId}
-                    </a>
-                    <span className="bk-text-2xs bk-text-brand-muted">{new Date(entry.ts * 1000).toLocaleString()}</span>
-                  </div>
-                  <div className="bk-grid bk-grid-cols-2 bk-gap-2 bk-text-2xs bk-text-brand-muted bk-mt-2">
-                    <Metric label="Sets" value={formatMoney(entry.setsAmount)} />
-                    <Metric label="Paid" value={formatMoney(entry.userPaid)} />
-                    <Metric label="Subsidy" value={formatMoney(entry.subsidyUsed)} />
-                    <Metric label="Actual" value={formatMoney(entry.actualCost)} />
-                  </div>
-                </li>
-              ))}
-              {ledgerRows.length === 0 && activeAddress && (
-                <li className="bk-rounded-xl bk-border bk-border-brand-ring/30 bk-bg-brand-surface bk-p-3 bk-text-2xs bk-text-brand-muted">
-                  No boost events recorded for this wallet.
-                </li>
-              )}
-            </ul>
           </div>
         </div>
       </div>

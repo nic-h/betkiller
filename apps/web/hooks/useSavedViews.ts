@@ -1,7 +1,7 @@
 'use client';
 
 import useSWR, { mutate } from "swr";
-import type { SavedView } from "@/lib/db";
+import type { SavedView } from "@/lib/savedViews";
 
 type SavedViewResponse = {
   chainId: number;

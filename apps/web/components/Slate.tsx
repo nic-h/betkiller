@@ -74,10 +74,11 @@ function SlateCard({ item }: { item: SlateEntry }) {
         <div className="bk-text-right bk-text-xs bk-text-brand-muted">
           Edge
           <div className="bk-text-lg bk-text-brand-blue bk-tabular-nums">{formatNumber(item.edgeScore, 2)}</div>
-          <div className="bk-flex bk-flex-col bk-gap-0.5 bk-text-2xs">
+          <div className="bk-mt-1 bk-grid bk-grid-cols-2 bk-gap-1 bk-text-2xs">
             <span>Boost {formatNumber(item.edgeBreakdown.boost, 2)}</span>
-            <span>Volume {formatNumber(item.edgeBreakdown.volume, 2)}</span>
+            <span>Vol {formatNumber(item.edgeBreakdown.volume, 2)}</span>
             <span>Traders {formatNumber(item.edgeBreakdown.traders, 2)}</span>
+            <span>Window {formatNumber(item.edgeBreakdown.cutoffWindow, 2)}</span>
           </div>
         </div>
       </div>

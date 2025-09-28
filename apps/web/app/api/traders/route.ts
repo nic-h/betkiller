@@ -30,6 +30,7 @@ export async function GET(request: Request) {
   const hasRewards = hasTable("reward_claims");
   const hasRedeems = hasTable("redemptions");
   const hasSponsoredLocks = hasTable("sponsored_locks");
+  const hasSurplus = hasTable("surplus_withdrawals");
 
   const rewardsCTE = hasRewards
     ? `SELECT lower(wallet) AS addr, SUM(CAST(amount_usdc AS INTEGER)) AS rewards
@@ -61,6 +62,14 @@ export async function GET(request: Request) {
        WHERE ts >= ? AND user IS NOT NULL
        GROUP BY lower(user)`;
 
+  const surplusCTE = hasSurplus
+    ? `SELECT lower(toAddr) AS addr,
+             SUM(CAST(amount AS INTEGER)) AS surplus
+       FROM surplus_withdrawals
+       WHERE ts >= ?
+       GROUP BY lower(toAddr)`
+    : `SELECT NULL AS addr, 0 AS surplus`;
+
   const sql = `
     WITH t AS (
       SELECT lower(trader) AS addr,
@@ -74,11 +83,13 @@ export async function GET(request: Request) {
     ),
     r AS (${rewardsCTE}),
     b AS (${boostsCTE}),
-    w AS (${redeemsCTE})
-    SELECT lower(COALESCE(t.addr, r.addr, b.addr, w.addr)) AS addr,
-           COALESCE(w.winnings, 0) + COALESCE(r.rewards, 0) - COALESCE(t.netBuys, 0) AS pnl,
+    w AS (${redeemsCTE}),
+    s AS (${surplusCTE})
+    SELECT lower(COALESCE(t.addr, r.addr, b.addr, w.addr, s.addr)) AS addr,
+           COALESCE(w.winnings, 0) + COALESCE(r.rewards, 0) + COALESCE(s.surplus, 0) - COALESCE(t.netBuys, 0) AS pnl,
            COALESCE(r.rewards, 0) AS claimedRewards,
            COALESCE(b.boostPaid, 0) AS boostSpend,
+           COALESCE(s.surplus, 0) AS surplusIncome,
            CASE
              WHEN COALESCE(b.boostPaid, 0) > 0 THEN (1.0 * (COALESCE(r.rewards, 0) - COALESCE(b.boostPaid, 0))) / COALESCE(b.boostPaid, 0)
              ELSE NULL
@@ -91,6 +102,7 @@ export async function GET(request: Request) {
     LEFT JOIN r USING (addr)
     LEFT JOIN b USING (addr)
     LEFT JOIN w USING (addr)
+    LEFT JOIN s USING (addr)
     WHERE addr IS NOT NULL
     ORDER BY ${sort === "volume" ? "volume" : sort === "rewards" ? "claimedRewards" : "pnl"} DESC
     LIMIT ? OFFSET ?`;
@@ -99,6 +111,7 @@ export async function GET(request: Request) {
   if (hasRewards) params.push(since);
   params.push(since);
   if (hasRedeems) params.push(since);
+  if (hasSurplus) params.push(since);
   params.push(limit, offset);
 
   const rows = database.prepare(sql).all(...params) as Array<{
@@ -106,6 +119,7 @@ export async function GET(request: Request) {
     pnl: number | string | null;
     claimedRewards: number | string | null;
     boostSpend: number | string | null;
+    surplusIncome: number | string | null;
     boostROI: number | null;
     winRate: number | null;
     volume: number | string | null;
@@ -124,6 +138,7 @@ export async function GET(request: Request) {
       pnl: toMicrosString(row.pnl ?? 0),
       claimedRewards: toMicrosString(row.claimedRewards ?? 0),
       boostSpend: toMicrosString(row.boostSpend ?? 0),
+      surplusIncome: toMicrosString(row.surplusIncome ?? 0),
       boostROI: row.boostROI ?? null,
       winRate: row.winRate ?? null,
       volume: toMicrosString(row.volume ?? 0),

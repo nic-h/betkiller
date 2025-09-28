@@ -10,6 +10,7 @@ import {
   insertRewardEvent,
   insertStakeEvent,
   insertSponsoredLock,
+  insertSurplusWithdrawal,
   marketExists,
   getActiveMarketIds
 } from "./db.js";
@@ -298,6 +299,21 @@ export async function handleMarketLog(provider: JsonRpcProvider, log: Log) {
         logIndex
       });
       enqueueProfile(redeemer);
+      break;
+    }
+    case "SurplusWithdrawn": {
+      const toAddr = toLower(parsed?.args?.to);
+      const amount = toAmountString(parsed?.args?.amount);
+      if (!toAddr || !amount) break;
+      insertSurplusWithdrawal({
+        txHash,
+        logIndex,
+        toAddr,
+        amount,
+        blockNumber: blockNum,
+        ts
+      });
+      enqueueProfile(toAddr);
       break;
     }
     default:

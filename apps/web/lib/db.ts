@@ -5,6 +5,7 @@ import path from "path";
 import { gunzipSync } from "node:zlib";
 
 import { analyzeMarketHeuristics, type MarketHeuristics } from "./heuristics";
+import { normalizeSavedViewQuery, type GlobalSearchResult, type SavedView } from "./savedViews";
 
 const DB_PATH =
   process.env.SQLITE_PATH ?? process.env.BK_DB ?? process.env.DATABASE_PATH ?? "../../data/context-edge.db";
@@ -256,6 +257,38 @@ export function getLeaderboard(range: LeaderboardRange, bucket: LeaderboardBucke
      WHERE lower(address) = ?`
   );
 
+  const bucketRows = db
+    .prepare(
+      `SELECT lower(user) AS addr,
+              kind,
+              SUM(CAST(amount AS INTEGER)) AS reward
+       FROM rewards
+       WHERE user IS NOT NULL AND kind IN ('creator', 'booster', 'trader') AND ts >= ?
+       GROUP BY addr, kind`
+    )
+    .all(cutoff) as { addr: string; kind: string; reward: number | null }[];
+
+  const bucketMap = new Map<string, { creator: number; booster: number; trader: number }>();
+  for (const row of bucketRows) {
+    const key = row.addr;
+    const entry = bucketMap.get(key) ?? { creator: 0, booster: 0, trader: 0 };
+    const rewardValue = microsToNumber(row.reward ?? 0);
+    switch ((row.kind ?? "").toLowerCase()) {
+      case "creator":
+        entry.creator += rewardValue;
+        break;
+      case "booster":
+        entry.booster += rewardValue;
+        break;
+      case "trader":
+        entry.trader += rewardValue;
+        break;
+      default:
+        break;
+    }
+    bucketMap.set(key, entry);
+  }
+
   const stakeMap = new Map<string, { stake: number; markets: number }>();
   for (const row of stakeRows) {
     stakeMap.set(row.addr, {
@@ -272,14 +305,18 @@ export function getLeaderboard(range: LeaderboardRange, bucket: LeaderboardBucke
       const rewardDollars = rewardMicro / 1_000_000;
       const stakeDollars = (stakeInfo.stake ?? 0) / 1_000_000;
       const efficiency = stakeDollars > 0 ? rewardDollars / stakeDollars : rewardDollars > 0 ? rewardDollars : 0;
+      const displayName = profile?.displayName?.trim() || null;
+      const handle = profile?.xHandle?.trim()?.replace(/^@+/, "") || null;
+      const primaryName = displayName ?? handle ?? shortenAddress(row.addr);
+      const buckets = bucketMap.get(row.addr) ?? { creator: 0, booster: 0, trader: 0 };
       return {
         addr: row.addr,
-        name: profile?.displayName ?? shortenAddress(row.addr),
-        xHandle: profile?.xHandle ?? null,
+        name: primaryName,
+        xHandle: handle,
         reward: rewardDollars,
-        rewardCreator: rewardDollars,
-        rewardBooster: 0,
-        rewardTrader: 0,
+        rewardCreator: buckets.creator,
+        rewardBooster: buckets.booster,
+        rewardTrader: buckets.trader,
         efficiency,
         marketsTouched: stakeInfo.markets ?? 0,
         recentRewardTs: row.last_ts ?? null,
@@ -287,7 +324,16 @@ export function getLeaderboard(range: LeaderboardRange, bucket: LeaderboardBucke
       };
     })
     .sort((a, b) => {
-      const key = bucket === "eff" ? b.efficiency - a.efficiency : (bucket === "creator" ? b.rewardCreator - a.rewardCreator : b.reward - a.reward);
+      const key =
+        bucket === "eff"
+          ? b.efficiency - a.efficiency
+          : bucket === "creator"
+          ? b.rewardCreator - a.rewardCreator
+          : bucket === "booster"
+          ? b.rewardBooster - a.rewardBooster
+          : bucket === "trader"
+          ? b.rewardTrader - a.rewardTrader
+          : b.reward - a.reward;
       if (key !== 0) return key;
       if ((b.marketsTouched ?? 0) !== (a.marketsTouched ?? 0)) return (b.marketsTouched ?? 0) - (a.marketsTouched ?? 0);
       return (b.recentRewardTs ?? 0) - (a.recentRewardTs ?? 0);
@@ -691,7 +737,7 @@ export function getResolvedMarkets(limit = 12): ResolvedMarket[] {
   }
 
   const redemptionStmt = db.prepare(
-    `SELECT SUM(CAST(payout AS INTEGER)) AS total, COUNT(DISTINCT redeemer) AS redeemers
+    `SELECT SUM(CAST(payout AS INTEGER)) AS total, COUNT(DISTINCT user) AS redeemers
      FROM redemptions
      WHERE marketId = ?`
   );
@@ -1326,19 +1372,6 @@ export function getKpis(): KPI[] {
     { label: "Open Risk", value: openRisk, format: "currency" }
   ];
 
-  if (ME_ADDRESS) {
-    const mySummary = getMySummary("24h");
-    const total = mySummary.find((entry) => entry.bucket === "TOTAL");
-    if (total) {
-      out.push({ label: "My Rewards (24h)", value: total.reward, format: "currency" });
-    }
-  }
-
-  const idxStatus = getIndexerStatus();
-  if (idxStatus) {
-    out.push({ label: "Indexer mins behind", value: idxStatus.minutesAgo, format: "number" });
-  }
-
   return out;
 }
 
@@ -1368,46 +1401,8 @@ export type CompetitorEntry = {
   markets: CompetitorMarketInsight[];
 };
 
-export type GlobalSearchResult = {
-  type: "market" | "wallet";
-  id: string;
-  title: string;
-  subtitle?: string;
-  score: number;
-};
-
-export type SavedView = {
-  id: string;
-  label: string;
-  query?: string;
-  filters?: Record<string, unknown>;
-  createdAt?: number | null;
-  updatedAt?: number | null;
-};
-
-export function normalizeSavedViewQuery(query?: string | null): string {
-  if (!query) return "";
-  const trimmed = query.startsWith("?") ? query.slice(1) : query;
-  if (!trimmed) return "";
-  const params = new URLSearchParams(trimmed);
-  const map = new Map<string, string[]>();
-  for (const [key, value] of params.entries()) {
-    if (!map.has(key)) {
-      map.set(key, []);
-    }
-    map.get(key)!.push(value);
-  }
-  const normalized = new URLSearchParams();
-  const keys = Array.from(map.keys()).sort();
-  for (const key of keys) {
-    const values = map.get(key)!;
-    values.sort();
-    for (const value of values) {
-      normalized.append(key, value);
-    }
-  }
-  return normalized.toString();
-}
+export type { GlobalSearchResult, SavedView } from "./savedViews";
+export { normalizeSavedViewQuery } from "./savedViews";
 
 type IndexerStatus = {
   lastBlock: number;

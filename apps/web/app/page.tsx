@@ -31,12 +31,22 @@ import {
   getWalletExposure,
   getBoostLedger
 } from "@/lib/db";
-import { formatMoney } from "@/lib/fmt";
+import { formatMoney, formatHoursUntil } from "@/lib/fmt";
+import type { SlateItem } from "@/lib/db";
 
-export default async function Page({ searchParams }: { searchParams: { range?: string; by?: string; density?: string } }) {
+export default async function Page({
+  searchParams
+}: {
+  searchParams: { range?: string; by?: string; density?: string; tab?: string };
+}) {
   const initialRange = (searchParams.range as any) ?? "14d";
   const initialBucket = (searchParams.by as any) ?? "total";
   const dense = searchParams.density === "compact";
+  const tab = (searchParams.tab ?? "traders").toLowerCase();
+  const showMarkets = tab === "markets";
+  const showTraders = tab === "traders";
+  const showCreators = tab === "creators";
+  const showActivity = tab === "activity";
 
   const [
     kpis,
@@ -72,7 +82,7 @@ export default async function Page({ searchParams }: { searchParams: { range?: s
 
   const me = getMeAddress();
   const myRank = me ? leaderboard.findIndex((row) => row.addr === me) + 1 || null : null;
-  const actionSlate = liveSlate.slice(0, 3);
+  const spotlightMarkets = liveSlate.slice(0, 3);
   const mySummaryLabel = mySummary.length > 1 ? "Past 14 days by bucket" : "Past 14 days";
 
   const searchEntries = Object.entries(searchParams ?? {}).filter((entry): entry is [string, string] => typeof entry[1] === "string");
@@ -81,54 +91,41 @@ export default async function Page({ searchParams }: { searchParams: { range?: s
   const defaultExposureAddr = me && walletExposure.some((row) => row.addr === me)
     ? me
     : walletExposure[0]?.addr ?? null;
-  const boostLedger = defaultExposureAddr ? getBoostLedger(defaultExposureAddr, 40) : [];
+  const boostLedger = showCreators && defaultExposureAddr ? getBoostLedger(defaultExposureAddr, 40) : [];
 
   return (
     <main className="bk-space-y-8">
-      <header className="bk-flex bk-flex-wrap bk-items-center bk-justify-between bk-gap-4">
-        <div>
-          <h1 className="bk-text-3xl bk-text-brand-text">Betkiller Dash</h1>
-          <p className="bk-text-brand-muted bk-text-sm">Live edge finder across Context Markets</p>
-          {activeSavedView && (
-            <div className="bk-mt-2 bk-flex bk-items-center bk-gap-2">
-              <span className="bk-text-2xs bk-text-brand-muted">View</span>
-              <span className="bk-rounded-full bk-bg-brand-blue/20 bk-text-brand-blue bk-px-3 bk-py-1 bk-text-2xs">
-                {activeSavedView.label}
-              </span>
-            </div>
-          )}
+      {activeSavedView && (
+        <div className="bk-flex bk-items-center bk-gap-2">
+          <span className="bk-text-2xs bk-text-brand-muted">View</span>
+          <span className="bk-rounded-full bk-bg-brand-blue/20 bk-text-brand-blue bk-px-3 bk-py-1 bk-text-2xs">
+            {activeSavedView.label}
+          </span>
         </div>
-        {me && (
-          <div className="bk-rounded-full bk-bg-brand-surface bk-border bk-border-brand-ring/40 bk-px-4 bk-py-2 bk-text-sm">
-            <span className="bk-text-brand-muted">Your wallet</span>
-            <span className="bk-ml-2 bk-text-brand-blue">{me}</span>
-            {myRank && myRank > 0 && <span className="bk-ml-3 bk-text-brand-muted">Rank #{myRank}</span>}
-          </div>
-        )}
-      </header>
+      )}
+
+      {me && (
+        <div className="bk-flex bk-items-center bk-gap-3 bk-rounded-full bk-bg-brand-surface bk-border bk-border-brand-ring/40 bk-px-4 bk-py-2 bk-text-sm">
+          <span className="bk-text-brand-muted">Wallet</span>
+          <span className="bk-text-brand-blue">{me}</span>
+          {myRank && myRank > 0 && <span className="bk-text-brand-muted">Rank #{myRank}</span>}
+        </div>
+      )}
 
       <KPIGrid items={kpis} />
 
-      <section className="bk-grid bk-grid-cols-1 xl:bk-grid-cols-12 bk-gap-6">
-        <div className="bk-space-y-6 xl:bk-col-span-8">
+      {showMarkets && (
+        <div className="bk-space-y-6">
           <ActionQueue initial={actionQueue} />
           <LiveSlate initial={liveSlate} />
+          <ActionSpotlight items={spotlightMarkets} />
           <LiquidityHoles initial={liquidityHoles} />
-          <div className="bk-rounded-2xl bk-bg-brand-panel bk-ring-1 bk-ring-brand-ring/60 bk-p-5 bk-space-y-3">
-            <header className="bk-flex bk-items-center bk-justify-between">
-              <h2 className="bk-text-sm bk-text-brand-muted">Action bar</h2>
-              <span className="bk-text-xs bk-text-brand-muted">What to focus on next</span>
-            </header>
-            <div className="bk-space-y-2 bk-text-sm">
-              {actionSlate.map((item) => (
-                <div key={item.marketId} className="bk-flex bk-justify-between">
-                  <span className="bk-text-brand-blue">{item.title}</span>
-                  <span className="bk-text-brand-muted">TVL {formatMoney(item.tvl)} • Edge {item.edgeScore.toFixed(1)}</span>
-                </div>
-              ))}
-              {actionSlate.length === 0 && <p className="bk-text-brand-muted">No immediate calls to action.</p>}
-            </div>
-          </div>
+          <NearResolutionList initial={nearResolution} />
+        </div>
+      )}
+
+      {showTraders && (
+        <div className="bk-space-y-6">
           <Leaderboard
             dense={dense}
             initialRows={leaderboard}
@@ -136,8 +133,12 @@ export default async function Page({ searchParams }: { searchParams: { range?: s
             initialBucket={initialBucket as any}
           />
           <PnLTable dense={dense} initialRows={pnlRows} initialRange="14d" />
+          <CompetitorWatch entries={competitors} />
         </div>
-        <div className="bk-space-y-6 xl:bk-col-span-4">
+      )}
+
+      {showCreators && (
+        <div className="bk-space-y-6">
           <section className="bk-rounded-2xl bk-bg-brand-panel bk-ring-1 bk-ring-brand-ring/60 bk-p-5 bk-space-y-3">
             <header className="bk-flex bk-items-center bk-justify-between">
               <div>
@@ -155,20 +156,73 @@ export default async function Page({ searchParams }: { searchParams: { range?: s
               ))}
             </div>
             <RewardClaimStatus address={me} />
-          <RewardActivity splits={mySummary} />
+            <RewardActivity splits={mySummary} />
           </section>
-          <NearResolutionList initial={nearResolution} />
-          <CompetitorWatch entries={competitors} />
           <WalletExposureExplorer
             initialExposure={walletExposure}
             initialLedger={boostLedger}
             initialAddress={defaultExposureAddr}
           />
-          <ResolvedRail items={resolved} />
         </div>
-      </section>
+      )}
 
-      <EventLog events={events} errors={errors} />
+      {showActivity && (
+        <div className="bk-space-y-6">
+          <ResolvedRail items={resolved} />
+          <EventLog events={events} errors={errors} />
+        </div>
+      )}
     </main>
+  );
+}
+
+function ActionSpotlight({ items }: { items: SlateItem[] }) {
+  const spotlight = items.slice(0, 3);
+  if (!spotlight.length) return null;
+
+  return (
+    <section className="bk-rounded-2xl bk-bg-brand-panel bk-ring-1 bk-ring-brand-ring/60 bk-p-5 bk-space-y-3">
+      <header className="bk-flex bk-items-center bk-justify-between">
+        <div>
+          <h2 className="bk-text-sm bk-text-brand-muted">Focus queue</h2>
+          <p className="bk-text-2xs bk-text-brand-muted">Markets with the highest immediate edge.</p>
+        </div>
+      </header>
+      <div className="bk-grid md:bk-grid-cols-3 bk-gap-3">
+        {spotlight.map((item, index) => {
+          const highlight = index === 0;
+          const cardTone = highlight ? "bk-border-warning/50 bk-bg-warning/10" : "bk-border-brand-ring/40 bk-bg-brand-surface";
+          return (
+            <div
+              key={item.marketId}
+              className={`bk-rounded-2xl bk-border ${cardTone} bk-p-4 bk-space-y-2`}
+            >
+              <div className="bk-flex bk-items-start bk-justify-between bk-gap-2">
+                <a
+                  href={`https://context.markets/markets/${item.marketId}`}
+                  target="_blank"
+                  rel="noreferrer"
+                  className={`bk-text-sm ${highlight ? "bk-text-brand-orange" : "bk-text-brand-text"} hover:bk-text-brand-blue`}
+                >
+                  {item.title}
+                </a>
+                <span className="bk-rounded-full bk-bg-brand-blue/15 bk-text-brand-blue bk-text-2xs bk-font-medium bk-px-2 bk-py-0.5">
+                  Edge {item.edgeScore.toFixed(1)}
+                </span>
+              </div>
+              <div className="bk-flex bk-flex-wrap bk-gap-3 bk-text-2xs bk-text-brand-muted">
+                <span>Cutoff {formatHoursUntil(item.cutoffTs)}</span>
+                <span>TVL {formatMoney(item.tvl)}</span>
+                <span>Boost {formatMoney(item.boostTotal)}</span>
+                <span>24h Vol {formatMoney(item.volume24h)}</span>
+                {item.costToMove && item.costToMove.costPerPoint != null && (
+                  <span>Δ1pt {formatMoney(item.costToMove.costPerPoint)}</span>
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </section>
   );
 }

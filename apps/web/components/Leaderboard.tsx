@@ -10,6 +10,28 @@ const BUCKETS: { key: LeaderboardBucket; label: string }[] = [
   { key: "eff", label: "Efficiency" }
 ];
 
+const shortenAddress = (value: string): string => {
+  if (!value) return "";
+  return value.length <= 10 ? value : `${value.slice(0, 6)}…${value.slice(-4)}`;
+};
+
+function XIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      xmlns="http://www.w3.org/2000/svg"
+      className={className ?? "bk-h-3 bk-w-3"}
+      aria-hidden="true"
+      focusable="false"
+    >
+      <path
+        fill="currentColor"
+        d="M8 2H1l8.261 11.014L1.45 22h2.65l6.388-7.349L16 22h7l-8.608-11.478L21.8 2h-2.65L13.164 8.886 8 2Zm9 18L5 4h2l12 16h-2Z"
+      />
+    </svg>
+  );
+}
+
 export function Leaderboard({
   dense = false,
   initialRows,
@@ -126,7 +148,7 @@ export function Leaderboard({
           </thead>
           <tbody className="bk-divide-y bk-divide-brand-ring/40">
             {rows.map((row, index) => (
-              <Row key={row.addr} position={index} row={row} highlight={index === 0} pad={pad} />
+              <Row key={row.addr} position={index} row={row} highlight={index === 0} pad={pad} dense={dense} />
             ))}
             {rows.length === 0 && (
               <tr>
@@ -147,14 +169,21 @@ function Row({
   position,
   row,
   highlight,
-  pad
+  pad,
+  dense
 }: {
   position: number;
   row: LeaderboardRow;
   highlight: boolean;
   pad: string;
+  dense: boolean;
 }) {
-  const stickyBg = highlight ? "bk-bg-brand-blue/20" : "bk-bg-brand-panel";
+  const stickyBg = highlight ? "bk-bg-brand-blue/10" : "bk-bg-brand-panel";
+  const handle = row.xHandle;
+  const showHandle = Boolean(handle);
+  const detailLine = dense
+    ? `Markets ${row.marketsTouched} • Last claim ${formatTimeAgo(row.recentRewardTs)}`
+    : `Markets ${row.marketsTouched} • Last claim ${formatTimeAgo(row.recentRewardTs)} • Active ${formatTimeAgo(row.lastSeen)}`;
   return (
     <tr className={highlight ? "bk-bg-brand-blue/10" : "hover:bk-bg-brand-surface/60"}>
       <td
@@ -172,22 +201,19 @@ function Row({
           >
             {row.name}
           </a>
-          {row.xHandle && (
+          {showHandle && (
             <a
-              href={`https://twitter.com/${row.xHandle}`}
+              href={`https://twitter.com/${handle}`}
               target="_blank"
               rel="noreferrer"
-              className="bk-text-brand-muted"
+              className="bk-inline-flex bk-items-center bk-gap-1 bk-text-brand-muted bk-text-xs hover:bk-text-brand-text"
             >
-              @{row.xHandle}
+              <XIcon />
+              <span>@{handle}</span>
             </a>
           )}
         </div>
-        <div className="bk-flex bk-flex-wrap bk-gap-2 bk-text-2xs bk-text-brand-muted">
-          <span>Markets {row.marketsTouched}</span>
-          <span>Last claim {formatTimeAgo(row.recentRewardTs)}</span>
-          <span>Active {formatTimeAgo(row.lastSeen)}</span>
-        </div>
+        <div className="bk-text-2xs bk-text-brand-muted bk-mt-1">{detailLine}</div>
       </td>
       <Cell value={row.reward} pad={pad} />
       <Cell value={row.rewardCreator} pad={pad} />

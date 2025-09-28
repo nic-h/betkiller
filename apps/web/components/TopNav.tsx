@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { normalizeSavedViewQuery, type GlobalSearchResult, type SavedView } from "@/lib/db";
+import { normalizeSavedViewQuery, type GlobalSearchResult, type SavedView } from "@/lib/savedViews";
 import { useSavedViews, optimisticUpdateSavedViews } from "@/hooks/useSavedViews";
 
 const tabs = [

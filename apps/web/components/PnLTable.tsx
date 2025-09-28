@@ -4,6 +4,23 @@ import { useEffect, useState, useTransition } from "react";
 import type { LeaderboardRange, PnlRow } from "@/lib/db";
 import { formatMoney } from "@/lib/fmt";
 
+function XIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      xmlns="http://www.w3.org/2000/svg"
+      className={className ?? "bk-h-3 bk-w-3"}
+      aria-hidden="true"
+      focusable="false"
+    >
+      <path
+        fill="currentColor"
+        d="M8 2H1L9.26086 13.0145L1.44995 21.9999H4.09998L10.4883 14.651L16 22H23L14.3917 10.5223L21.8001 2H19.1501L13.1643 8.88578L8 2ZM17 20L5 4H7L19 20H17Z"
+      />
+    </svg>
+  );
+}
+
 const RANGES: LeaderboardRange[] = ["24h", "7d", "14d", "30d", "ytd", "all"];
 
 export function PnLTable({
@@ -102,8 +119,15 @@ export function PnLTable({
                       {row.name}
                     </a>
                     {row.xHandle && (
-                      <a href={`https://twitter.com/${row.xHandle}`} target="_blank" rel="noreferrer" className="bk-text-brand-muted">
-                        @{row.xHandle}
+                      <a
+                        href={`https://twitter.com/${row.xHandle}`}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="bk-inline-flex bk-items-center bk-gap-1 bk-text-2xs bk-text-brand-muted hover:bk-text-brand-text"
+                        aria-label={`@${row.xHandle} on X`}
+                      >
+                        <XIcon />
+                        <span>@{row.xHandle}</span>
                       </a>
                     )}
                   </div>

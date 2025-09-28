@@ -14,7 +14,7 @@ const snapshot = {
   trades: db.prepare(`SELECT * FROM trades WHERE ts >= ?`).all(cutoff),
   locks: db.prepare(`SELECT * FROM locks WHERE ts >= ?`).all(cutoff),
   rewards: db.prepare(`SELECT * FROM rewards WHERE ts >= ?`).all(cutoff),
-  reward_claims: db.prepare(`SELECT * FROM reward_claims WHERE ts >= ?`).all(cutoff),
+  reward_claims: db.prepare(`SELECT * FROM reward_claims WHERE block_time >= ?`).all(cutoff),
   meta: {
     exportedAt: new Date().toISOString(),
     chainId: 8453,
