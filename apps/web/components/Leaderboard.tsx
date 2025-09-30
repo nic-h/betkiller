@@ -1,13 +1,20 @@
 'use client';
 
 import { useEffect, useMemo, useState, useTransition } from "react";
-import type { LeaderboardBucket, LeaderboardRange, LeaderboardRow } from "@/lib/db";
-import { formatMoney, formatNumber } from "@/lib/fmt";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 
-const RANGES: LeaderboardRange[] = ["24h", "7d", "14d", "30d", "ytd", "all"];
+import type { LeaderboardBucket, LeaderboardRow } from "@/lib/db";
+import { formatMoney, formatNumber } from "@/lib/fmt";
+import { useRange } from "@/components/RangeProvider";
+import { RANGE_OPTIONS, formatRangeLabel } from "@/lib/range";
+
+const RANGES = RANGE_OPTIONS;
 const BUCKETS: { key: LeaderboardBucket; label: string }[] = [
   { key: "total", label: "Total" },
-  { key: "eff", label: "Efficiency" }
+  { key: "creator", label: "Creator" },
+  { key: "booster", label: "Booster" },
+  { key: "trader", label: "Trader" },
+  { key: "efficiency", label: "Efficiency" }
 ];
 
 function XIcon({ className }: { className?: string }) {
@@ -30,22 +37,31 @@ function XIcon({ className }: { className?: string }) {
 export function Leaderboard({
   dense = false,
   initialRows,
-  initialRange,
   initialBucket
 }: {
   dense?: boolean;
   initialRows: LeaderboardRow[];
-  initialRange: LeaderboardRange;
   initialBucket: LeaderboardBucket;
 }) {
+  const router = useRouter();
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
+  const { range, setRange } = useRange();
   const [rows, setRows] = useState(initialRows);
-  const allowedRanges = new Set<LeaderboardRange>(RANGES);
-  const safeInitialRange = allowedRanges.has(initialRange) ? initialRange : "14d";
-  const [range, setRange] = useState<LeaderboardRange>(safeInitialRange);
   const allowedBuckets = BUCKETS.map((entry) => entry.key);
-  const safeInitialBucket = allowedBuckets.includes(initialBucket) ? initialBucket : 'total';
-  const [bucket, setBucket] = useState<LeaderboardBucket>(safeInitialBucket as LeaderboardBucket);
+  const safeInitialBucket = allowedBuckets.includes(initialBucket) ? initialBucket : "total";
+  const [bucket, setBucket] = useState<LeaderboardBucket>(safeInitialBucket);
   const [isPending, startTransition] = useTransition();
+
+  useEffect(() => {
+    setRows(initialRows);
+  }, [initialRows]);
+
+  useEffect(() => {
+    if (allowedBuckets.includes(initialBucket)) {
+      setBucket(initialBucket);
+    }
+  }, [initialBucket]);
 
   useEffect(() => {
     startTransition(() => {
@@ -53,17 +69,7 @@ export function Leaderboard({
         .then((res) => res.json())
         .then((data) => {
           if (Array.isArray(data?.rows)) {
-            const parsed = (data.rows as any[]).map((row) => ({
-              ...row,
-              reward: Number(row.reward ?? 0) / 1_000_000,
-              rewardCreator: Number(row.rewardCreator ?? row.reward ?? 0) / 1_000_000,
-              rewardBooster: Number(row.rewardBooster ?? 0) / 1_000_000,
-              rewardTrader: Number(row.rewardTrader ?? 0) / 1_000_000,
-              efficiency: Number(row.efficiency ?? 0),
-              marketsTouched: Number(row.marketsTouched ?? 0),
-              recentRewardTs: row.recentRewardTs ?? null
-            }));
-            setRows(parsed as LeaderboardRow[]);
+            setRows(data.rows as LeaderboardRow[]);
           }
         })
         .catch(() => {
@@ -74,9 +80,22 @@ export function Leaderboard({
 
   const title = useMemo(() => {
     const bucketLabel = BUCKETS.find((b) => b.key === bucket)?.label ?? "Total";
-    const rangeLabel = range === "ytd" ? "YTD" : range === "all" ? "All" : range.toUpperCase();
+    const rangeLabel = formatRangeLabel(range);
     return `${bucketLabel} — ${rangeLabel}`;
   }, [bucket, range]);
+
+  const handleBucketChange = (next: LeaderboardBucket) => {
+    setBucket(next);
+    const params = new URLSearchParams(searchParams?.toString() ?? "");
+    if (next === "total") {
+      params.delete("by");
+    } else {
+      params.set("by", next);
+    }
+    const query = params.toString();
+    const target = query ? `${pathname}?${query}` : pathname;
+    router.replace(target as any, { scroll: false });
+  };
 
   const pad = dense ? "bk-px-2 bk-py-1.5" : "bk-px-3 bk-py-2";
   const tableText = dense ? "bk-text-xs" : "bk-text-sm";
@@ -90,9 +109,7 @@ export function Leaderboard({
           <p className="bk-text-lg bk-mt-1 bk-text-brand-text">{title}</p>
         </div>
         <div className="bk-flex bk-gap-2 bk-flex-wrap">
-          {RANGES.map((value) => {
-            const label = value === "ytd" ? "YTD" : value === "all" ? "All" : value.toUpperCase();
-            return (
+          {RANGES.map((value) => (
             <button
               key={value}
               className={`bk-rounded-full bk-px-3 bk-py-1.5 bk-text-xs bk-font-medium ${
@@ -100,9 +117,9 @@ export function Leaderboard({
               }`}
               onClick={() => setRange(value)}
             >
-              {label}
+              {formatRangeLabel(value)}
             </button>
-          );})}
+          ))}
         </div>
         <div className="bk-flex bk-gap-2 bk-flex-wrap">
           {BUCKETS.map((option) => (
@@ -113,7 +130,7 @@ export function Leaderboard({
                   ? "bk-bg-brand-blue bk-text-black"
                   : "bk-bg-brand-surface bk-text-brand-muted hover:bk-text-brand-text"
               }`}
-              onClick={() => setBucket(option.key)}
+              onClick={() => handleBucketChange(option.key)}
             >
               {option.label}
             </button>

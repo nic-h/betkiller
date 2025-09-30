@@ -48,3 +48,17 @@ export function formatDateShort(timestamp: number): string {
   }
   return `${day} ${month}, ${hour}:${minute}`.trim();
 }
+
+export function formatDateTime(timestamp: number): string {
+  const date = new Date(timestamp * 1000);
+  return new Intl.DateTimeFormat(LOCALE, {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+    timeZone: TIME_ZONE
+  }).format(date);
+}

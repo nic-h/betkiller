@@ -33,7 +33,10 @@ function serializeEpochs(epochs: IndexerRewardSummary["epochs"], claimable: Map<
   return epochs.map((epoch) => ({
     epochId: epoch.epochId,
     status: epoch.status,
-    claimed: epoch.status === "claimed" ? epoch.claimed : "0",
+    claimed:
+      epoch.status === "claimed"
+        ? microsToDecimalString(parseMicros(epoch.claimed))
+        : "0",
     txHash: epoch.status === "claimed" ? epoch.txHash : null,
     claimable: microsToDecimalString(claimable.get(epoch.epochId) ?? 0n)
   }));
@@ -96,6 +99,27 @@ async function fetchProviderClaims(address: string): Promise<ProviderClaimSummar
   }
 }
 
+function parseMicros(value: string | number | null | undefined): bigint {
+  if (value == null) return 0n;
+  if (typeof value === "bigint") return value;
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) return 0n;
+    return BigInt(Math.trunc(value));
+  }
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!trimmed) return 0n;
+    try {
+      return BigInt(trimmed);
+    } catch (error) {
+      const numeric = Number(trimmed);
+      if (!Number.isFinite(numeric)) return 0n;
+      return BigInt(Math.trunc(numeric));
+    }
+  }
+  return 0n;
+}
+
 export async function GET(_request: Request, { params }: { params: { address: string } }) {
   const baseUrl = getIndexerBaseUrl();
   if (!baseUrl) {
@@ -122,14 +146,16 @@ export async function GET(_request: Request, { params }: { params: { address: st
           }
           return acc;
         }, 0n)
-      : 0n;
+      : parseMicros(summary.totals.pending);
     return NextResponse.json({
       address: summary.address,
       epochs,
       totals: {
-        claimable: provider ? microsToDecimalString(claimableTotal) : summary.totals.claimable,
-        claimed: summary.totals.claimed,
-        pending: provider ? microsToDecimalString(pendingTotalMicro) : summary.totals.pending
+        claimable: microsToDecimalString(
+          provider ? claimableTotal : parseMicros(summary.totals.claimable)
+        ),
+        claimed: microsToDecimalString(parseMicros(summary.totals.claimed)),
+        pending: microsToDecimalString(pendingTotalMicro)
       },
       lastRootEpoch: summary.lastRootEpoch,
       syncedAt: summary.syncedAt,

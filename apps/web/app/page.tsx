@@ -1,212 +1,218 @@
-import { KPIGrid } from "@/components/KPI";
-import { Leaderboard } from "@/components/Leaderboard";
-import { LiveSlate } from "@/components/Slate";
-import { NearResolutionList } from "@/components/NearResolution";
-import { SplitBar } from "@/components/SplitBar";
-import { CompetitorWatch } from "@/components/CompetitorWatch";
-import { EventLog } from "@/components/EventLog";
-import { PnLTable } from "@/components/PnLTable";
-import { ResolvedRail } from "@/components/ResolvedRail";
-import { RewardActivity } from "@/components/RewardActivity";
-import { RewardClaimStatus } from "@/components/RewardClaimStatus";
-import { ActionQueue } from "@/components/ActionQueue";
-import { LiquidityHoles } from "@/components/LiquidityHoles";
-import { WalletExposureExplorer } from "@/components/WalletExposureExplorer";
+import { Metadata } from "next";
+
 import {
+  getActionQueue,
   getCompetitorWatch,
-  getEventLog,
   getErrorLog,
+  getEventLog,
   getKpis,
   getLeaderboard,
   getLiveSlate,
+  getMarketsTable,
   getMeAddress,
   getMySummary,
   getNearResolution,
   getPnl,
   getResolvedMarkets,
-  getActionQueue,
-  getLiquidityHoles,
   getWalletExposure,
   getBoostLedger
 } from "@/lib/db";
-import { formatMoney, formatHoursUntil } from "@/lib/fmt";
-import type { SlateItem } from "@/lib/db";
+import type { LeaderboardBucket } from "@/lib/db";
+import { ensureRange, formatRangeLabel } from "@/lib/range";
+import { KPIGrid } from "@/components/KPI";
+import { LiveSlate, type SlateFilter } from "@/components/Slate";
+import { ActionQueue } from "@/components/ActionQueue";
+import { Leaderboard } from "@/components/Leaderboard";
+import { PnLTable } from "@/components/PnLTable";
+import { MyRewardsCard } from "@/components/MyRewardsCard";
+import { NearResolutionList } from "@/components/NearResolution";
+import { CompetitorWatch } from "@/components/CompetitorWatch";
+import { ResolvedRail } from "@/components/ResolvedRail";
+import { EventLog } from "@/components/EventLog";
+import { WalletExposureExplorer } from "@/components/WalletExposureExplorer";
+import { ActivityFeed } from "@/components/ActivityFeed";
+import { MarketsTable } from "@/components/MarketsTable";
+import { MetricsPopover } from "@/components/MetricsPopover";
+
+export const metadata: Metadata = {
+  title: "context.dash",
+  description: "Live edge finder across Context Markets"
+};
+
+type TabKey = "traders" | "markets" | "activity" | "creators";
+type FilterKey = SlateFilter;
 
 export default async function Page({
   searchParams
 }: {
-  searchParams: { range?: string; by?: string; density?: string; tab?: string };
+  searchParams: { [key: string]: string | string[] | undefined };
 }) {
-  const initialRange = (searchParams.range as any) ?? "14d";
-  const initialBucket = (searchParams.by as any) ?? "total";
-  const dense = searchParams.density === "compact";
-  const tab = (searchParams.tab ?? "traders").toLowerCase();
-  const showMarkets = tab === "markets";
-  const showTraders = tab === "traders";
-  const showCreators = tab === "creators";
-  const showActivity = tab === "activity";
+  const rangeParam = getFirst(searchParams.range);
+  const tabParam = getFirst(searchParams.tab);
+  const filterParam = getFirst(searchParams.filter);
+  const bucketParam = getFirst(searchParams.by);
+
+  const range = ensureRange(rangeParam);
+  const tab = normalizeTab(tabParam);
+  const filter = normalizeFilter(filterParam);
+  const bucket = normalizeBucket(bucketParam);
+
+  if (tab === "markets") {
+    const markets = getMarketsTable(range, 600);
+    return (
+      <main className="bk-space-y-6">
+        <MarketsTable rows={markets} />
+      </main>
+    );
+  }
+
+  if (tab === "activity") {
+    const events = getEventLog(range, 160);
+    return (
+      <main className="bk-space-y-6">
+        <ActivityFeed initial={events} range={range} />
+      </main>
+    );
+  }
+
+  if (tab === "creators") {
+    const [leaderboardRows, competitors, splits] = await Promise.all([
+      Promise.resolve(getLeaderboard(range, "creator")),
+      Promise.resolve(getCompetitorWatch()),
+      Promise.resolve(getMySummary(range))
+    ]);
+
+    const me = getMeAddress();
+    const rangeLabel = formatRangeLabel(range);
+
+    return (
+      <main className="bk-space-y-6">
+        <Leaderboard initialRows={leaderboardRows} initialBucket="creator" />
+        <div className="bk-grid bk-grid-cols-1 xl:bk-grid-cols-3 bk-gap-4">
+          <MyRewardsCard address={me} splits={splits} rangeLabel={rangeLabel} />
+          <div className="xl:bk-col-span-2">
+            <CompetitorWatch entries={competitors} />
+          </div>
+        </div>
+      </main>
+    );
+  }
 
   const [
     kpis,
-    leaderboard,
-    liveSlate,
-    nearResolution,
-    mySummary,
+    slate,
+    queue,
+    leaderboardRows,
     pnlRows,
+    rewardSplits,
+    nearResolution,
     competitors,
+    resolved,
     events,
     errors,
-    resolved,
-    actionQueue,
-    liquidityHoles,
-    walletExposure
+    exposures
   ] = await Promise.all([
-    getKpis(),
-    Promise.resolve(getLeaderboard(initialRange as any, initialBucket as any)),
-    Promise.resolve(getLiveSlate()),
-    Promise.resolve(getNearResolution()),
-    Promise.resolve(getMySummary("14d")),
-    Promise.resolve(getPnl("14d")),
+    Promise.resolve(getKpis(range)),
+    Promise.resolve(getLiveSlate(range, 40)),
+    getActionQueue(range),
+    Promise.resolve(getLeaderboard(range, bucket)),
+    Promise.resolve(getPnl(range, 40)),
+    Promise.resolve(getMySummary(range)),
+    Promise.resolve(getNearResolution(range)),
     Promise.resolve(getCompetitorWatch()),
-    Promise.resolve(getEventLog()),
-    Promise.resolve(getErrorLog()),
     Promise.resolve(getResolvedMarkets(8)),
-    Promise.resolve(getActionQueue()),
-    Promise.resolve(getLiquidityHoles()),
-    Promise.resolve(getWalletExposure())
+    Promise.resolve(getEventLog(range, 60)),
+    Promise.resolve(getErrorLog()),
+    Promise.resolve(getWalletExposure(60))
   ]);
 
   const me = getMeAddress();
-  const myRank = me ? leaderboard.findIndex((row) => row.addr === me) + 1 || null : null;
-  const spotlightMarkets = liveSlate.slice(0, 3);
-  const mySummaryLabel = mySummary.length > 1 ? "Past 14 days by bucket" : "Past 14 days";
-
-  const defaultExposureAddr = me && walletExposure.some((row) => row.addr === me)
-    ? me
-    : walletExposure[0]?.addr ?? null;
-  const boostLedger = showCreators && defaultExposureAddr ? getBoostLedger(defaultExposureAddr, 40) : [];
+  const initialLedgerAddress = me ?? exposures[0]?.addr ?? null;
+  const boostLedger = initialLedgerAddress ? getBoostLedger(initialLedgerAddress, 40) : [];
+  const rangeLabel = formatRangeLabel(range);
 
   return (
-    <main className="bk-space-y-8">
-      {me && (
-        <div className="bk-flex bk-items-center bk-gap-3 bk-rounded-full bk-bg-brand-surface bk-border bk-border-brand-ring/40 bk-px-4 bk-py-2 bk-text-sm">
-          <span className="bk-text-brand-muted">Wallet</span>
-          <span className="bk-text-brand-blue">{me}</span>
-          {myRank && myRank > 0 && <span className="bk-text-brand-muted">Rank #{myRank}</span>}
+    <main className="bk-space-y-6">
+      <section className="bk-space-y-4">
+        <div className="bk-flex bk-flex-wrap bk-items-center bk-justify-between bk-gap-3">
+          <h1 className="bk-text-lg bk-font-medium bk-text-brand-text">Edge overview</h1>
+          <MetricsPopover />
         </div>
-      )}
+        <KPIGrid items={kpis} />
+      </section>
 
-      <KPIGrid items={kpis} />
-
-      {showMarkets && (
-        <div className="bk-space-y-6">
-          <ActionQueue initial={actionQueue} />
-          <LiveSlate initial={liveSlate} />
-          <ActionSpotlight items={spotlightMarkets} />
-          <LiquidityHoles initial={liquidityHoles} />
-          <NearResolutionList initial={nearResolution} />
+      <section className="bk-grid bk-grid-cols-1 xl:bk-grid-cols-12 bk-gap-4">
+        <div className="xl:bk-col-span-8 bk-space-y-4">
+          <LiveSlate initial={slate} filter={filter} />
+          <ActionQueue initial={queue} range={range} />
+          <Leaderboard initialRows={leaderboardRows} initialBucket={bucket} />
+          <PnLTable initialRows={pnlRows} initialRange={range} />
         </div>
-      )}
-
-      {showTraders && (
-        <div className="bk-space-y-6">
-          <Leaderboard
-            dense={dense}
-            initialRows={leaderboard}
-            initialRange={initialRange as any}
-            initialBucket={initialBucket as any}
-          />
-          <PnLTable dense={dense} initialRows={pnlRows} initialRange="14d" />
+        <div className="xl:bk-col-span-4 bk-space-y-4">
+          <MyRewardsCard address={me} splits={rewardSplits} rangeLabel={rangeLabel} />
+          <NearResolutionList initial={nearResolution} range={range} />
           <CompetitorWatch entries={competitors} />
         </div>
-      )}
+      </section>
 
-      {showCreators && (
-        <div className="bk-space-y-6">
-          <section className="bk-rounded-2xl bk-bg-brand-panel bk-ring-1 bk-ring-brand-ring/60 bk-p-5 bk-space-y-3">
-            <header className="bk-flex bk-items-center bk-justify-between">
-              <div>
-                <h2 className="bk-text-sm bk-text-brand-muted">My rewards</h2>
-                <p className="bk-text-xs bk-text-brand-muted">{mySummaryLabel}</p>
-              </div>
-            </header>
-            <SplitBar data={mySummary} />
-            <div className="bk-grid bk-grid-cols-2 bk-gap-2 bk-text-xs bk-text-brand-muted">
-              {mySummary.map((item) => (
-                <div key={item.bucket} className="bk-flex bk-justify-between bk-tabular-nums">
-                  <span>{item.bucket}</span>
-                  <span>{formatMoney(item.reward)}</span>
-                </div>
-              ))}
-            </div>
-            <RewardClaimStatus address={me} />
-            <RewardActivity splits={mySummary} />
-          </section>
-          <WalletExposureExplorer
-            initialExposure={walletExposure}
-            initialLedger={boostLedger}
-            initialAddress={defaultExposureAddr}
-          />
-        </div>
-      )}
+      <WalletExposureExplorer
+        initialExposure={exposures}
+        initialLedger={boostLedger}
+        initialAddress={initialLedgerAddress}
+      />
 
-      {showActivity && (
-        <div className="bk-space-y-6">
-          <ResolvedRail items={resolved} />
-          <EventLog events={events} errors={errors} />
-        </div>
-      )}
+      <ResolvedRail items={resolved} />
+      <EventLog events={events} errors={errors} />
     </main>
   );
 }
 
-function ActionSpotlight({ items }: { items: SlateItem[] }) {
-  const spotlight = items.slice(0, 3);
-  if (!spotlight.length) return null;
+function normalizeTab(value: string | undefined): TabKey {
+  switch ((value ?? "traders").toLowerCase()) {
+    case "markets":
+      return "markets";
+    case "activity":
+      return "activity";
+    case "creators":
+      return "creators";
+    case "overview":
+    case "traders":
+    default:
+      return "traders";
+  }
+}
 
-  return (
-    <section className="bk-rounded-2xl bk-bg-brand-panel bk-ring-1 bk-ring-brand-ring/60 bk-p-5 bk-space-y-3">
-      <header className="bk-flex bk-items-center bk-justify-between">
-        <div>
-          <h2 className="bk-text-sm bk-text-brand-muted">Focus queue</h2>
-          <p className="bk-text-2xs bk-text-brand-muted">Markets with the highest immediate edge.</p>
-        </div>
-      </header>
-      <div className="bk-grid md:bk-grid-cols-3 bk-gap-3">
-        {spotlight.map((item, index) => {
-          const highlight = index === 0;
-          const cardTone = highlight ? "bk-border-warning/50 bk-bg-warning/10" : "bk-border-brand-ring/40 bk-bg-brand-surface";
-          return (
-            <div
-              key={item.marketId}
-              className={`bk-rounded-2xl bk-border ${cardTone} bk-p-4 bk-space-y-2`}
-            >
-              <div className="bk-flex bk-items-start bk-justify-between bk-gap-2">
-                <a
-                  href={`https://context.markets/markets/${item.marketId}`}
-                  target="_blank"
-                  rel="noreferrer"
-                  className={`bk-text-sm ${highlight ? "bk-text-brand-orange" : "bk-text-brand-text"} hover:bk-text-brand-blue`}
-                >
-                  {item.title}
-                </a>
-                <span className="bk-rounded-full bk-bg-brand-blue/15 bk-text-brand-blue bk-text-2xs bk-font-medium bk-px-2 bk-py-0.5">
-                  Edge {item.edgeScore.toFixed(1)}
-                </span>
-              </div>
-              <div className="bk-flex bk-flex-wrap bk-gap-3 bk-text-2xs bk-text-brand-muted">
-                <span>Cutoff {formatHoursUntil(item.cutoffTs)}</span>
-                <span>TVL {formatMoney(item.tvl)}</span>
-                <span>Boost {formatMoney(item.boostTotal)}</span>
-                <span>24h Vol {formatMoney(item.volume24h)}</span>
-                {item.costToMove && item.costToMove.costPerPoint != null && (
-                  <span>Δ1pt {formatMoney(item.costToMove.costPerPoint)}</span>
-                )}
-              </div>
-            </div>
-          );
-        })}
-      </div>
-    </section>
-  );
+function normalizeFilter(value: string | undefined): FilterKey {
+  switch ((value ?? "top").toLowerCase()) {
+    case "boosted":
+      return "boosted";
+    case "resolution":
+    case "near":
+      return "resolution";
+    case "new":
+      return "new";
+    default:
+      return "top";
+  }
+}
+
+function normalizeBucket(value: string | undefined): LeaderboardBucket {
+  switch ((value ?? "total").toLowerCase()) {
+    case "creator":
+      return "creator";
+    case "booster":
+      return "booster";
+    case "trader":
+      return "trader";
+    case "eff":
+    case "efficiency":
+      return "efficiency";
+    default:
+      return "total";
+  }
+}
+
+function getFirst(value: string | string[] | undefined): string | undefined {
+  if (Array.isArray(value)) return value[0];
+  return value;
 }

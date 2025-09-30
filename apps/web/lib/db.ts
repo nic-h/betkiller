@@ -5,6 +5,10 @@ import path from "path";
 import { gunzipSync } from "node:zlib";
 
 import { analyzeMarketHeuristics, type MarketHeuristics } from "./heuristics";
+import { resolveIdentity, shortenAddress } from "@/lib/identity";
+import type { MetricKey } from "@/lib/metrics";
+import { ensureRange, RANGE_DEFAULT, type RangeKey } from "@/lib/range";
+import { fetchIndexerJson } from "@/lib/indexer";
 
 const DB_PATH =
   process.env.SQLITE_PATH ?? process.env.BK_DB ?? process.env.DATABASE_PATH ?? "../../data/context-edge.db";
@@ -92,51 +96,31 @@ export function hasTable(name: string): boolean {
   return !!row;
 }
 
-export function cutoff(range?: string): number {
+export function cutoff(range?: string | RangeKey): number {
   const nowSec = Math.floor(Date.now() / 1000);
   const day = 24 * 60 * 60;
-  const normalized = (range ?? "14d").toLowerCase();
+  const normalized = ensureRange(range ?? RANGE_DEFAULT);
   switch (normalized) {
     case "24h":
       return nowSec - day;
     case "7d":
       return nowSec - 7 * day;
     case "30d":
-      return nowSec - 30 * day;
-    case "ytd": {
-      const now = new Date();
-      const start = Date.UTC(now.getUTCFullYear(), 0, 1) / 1000;
-      return Math.floor(start);
-    }
-    case "all":
-      return 0;
-    case "14d":
     default:
-      return nowSec - 14 * day;
+      return nowSec - 30 * day;
   }
 }
 
-function rangeWindowSeconds(range?: string): number | null {
-  const nowSec = Math.floor(Date.now() / 1000);
-  const day = 24 * 60 * 60;
-  const normalized = (range ?? "14d").toLowerCase();
+function rangeWindowSeconds(range?: string | RangeKey): number {
+  const normalized = ensureRange(range ?? RANGE_DEFAULT);
   switch (normalized) {
     case "24h":
-      return day;
+      return 24 * 60 * 60;
     case "7d":
-      return 7 * day;
-    case "14d":
-      return 14 * day;
+      return 7 * 24 * 60 * 60;
     case "30d":
-      return 30 * day;
-    case "ytd": {
-      const now = new Date();
-      const start = Date.UTC(now.getUTCFullYear(), 0, 1) / 1000;
-      return Math.max(0, Math.floor(nowSec - start));
-    }
-    case "all":
     default:
-      return null;
+      return 30 * 24 * 60 * 60;
   }
 }
 
@@ -247,8 +231,8 @@ function rangeCutoff(range: LeaderboardRange | string): number {
   return cutoff(range);
 }
 
-export type LeaderboardBucket = "total" | "creator" | "booster" | "trader" | "eff";
-export type LeaderboardRange = "24h" | "7d" | "14d" | "30d" | "ytd" | "all";
+export type LeaderboardBucket = "total" | "creator" | "booster" | "trader" | "efficiency";
+export type LeaderboardRange = RangeKey;
 
 export type LeaderboardRow = {
   addr: string;
@@ -338,15 +322,18 @@ export function getLeaderboard(range: LeaderboardRange, bucket: LeaderboardBucke
 
   const results: LeaderboardRow[] = rewardRows
     .map((row) => {
-      const profile = profileStmt.get(row.addr) as { displayName: string | null; xHandle: string | null; lastSeen: number | null } | undefined;
-      const stakeInfo = stakeMap.get(row.addr) ?? { stake: 0, markets: 0 };
-      const rewardMicro = row.reward ?? 0;
-      const rewardDollars = rewardMicro / 1_000_000;
-      const stakeDollars = (stakeInfo.stake ?? 0) / 1_000_000;
-      const efficiency = stakeDollars > 0 ? rewardDollars / stakeDollars : rewardDollars > 0 ? rewardDollars : 0;
-      const displayName = profile?.displayName?.trim() || null;
-      const handle = profile?.xHandle?.trim()?.replace(/^@+/, "") || null;
-      const primaryName = displayName ?? handle ?? shortenAddress(row.addr);
+    const profile = profileStmt.get(row.addr) as { displayName: string | null; xHandle: string | null; lastSeen: number | null } | undefined;
+    const stakeInfo = stakeMap.get(row.addr) ?? { stake: 0, markets: 0 };
+    const rewardMicro = row.reward ?? 0;
+    const rewardDollars = rewardMicro / 1_000_000;
+    const stakeDollars = (stakeInfo.stake ?? 0) / 1_000_000;
+    const efficiency = stakeDollars > 0 ? rewardDollars / stakeDollars : rewardDollars > 0 ? rewardDollars : 0;
+    const handle = profile?.xHandle?.trim()?.replace(/^@+/, "") || null;
+    const primaryName = resolveIdentity({
+      address: row.addr,
+      displayName: profile?.displayName ?? null,
+      xHandle: handle
+    });
       const buckets = bucketMap.get(row.addr) ?? { creator: 0, booster: 0, trader: 0 };
       return {
         addr: row.addr,
@@ -364,7 +351,7 @@ export function getLeaderboard(range: LeaderboardRange, bucket: LeaderboardBucke
     })
     .sort((a, b) => {
       const key =
-        bucket === "eff"
+        bucket === "efficiency"
           ? b.efficiency - a.efficiency
           : bucket === "creator"
           ? b.rewardCreator - a.rewardCreator
@@ -395,9 +382,10 @@ export type SlateItem = {
   marketId: string;
   title: string;
   cutoffTs: number;
+  createdAt: number | null;
   boostTotal: number;
-  volume24h: number;
-  uniqueTraders24h: number;
+  volumeRange: number;
+  uniqueTraders: number;
   edgeScore: number;
   edgeBreakdown: EdgeBreakdown;
   tvl: number;
@@ -424,12 +412,13 @@ export type SlateItem = {
     settlementScore: number;
     warnings: string[];
   } | null;
+  category?: string | null;
 };
 
 export type ActionQueueItem = {
   marketId: string;
   title: string;
-  action: "boost" | "bet" | "monitor";
+  action: "create" | "boost" | "bet" | "claim";
   rationale: string;
   score: number;
   hoursToCutoff: number;
@@ -440,6 +429,8 @@ export type ActionQueueItem = {
   tvl: number;
   costToMove?: number | null;
   clarityScore?: number | null;
+  claimable?: number | null;
+  ctaHref?: string;
 };
 
 export type LiquidityHoleItem = {
@@ -454,10 +445,25 @@ export type LiquidityHoleItem = {
   costToMove?: number | null;
 };
 
-export function getLiveSlate(limit = 20): SlateItem[] {
+export type MarketTableRow = {
+  marketId: string;
+  title: string;
+  category: string | null;
+  priceYes: number | null;
+  tvl: number;
+  spread: number | null;
+  costToMove: number | null;
+  cutoffTs: number;
+  sparkline: number[];
+  boostTotal: number;
+  volumeRange: number;
+  createdAt: number | null;
+};
+
+export function getLiveSlate(range: RangeKey = RANGE_DEFAULT, limit = 20): SlateItem[] {
   const db = getDatabase();
   const now = Math.floor(Date.now() / 1000);
-  const cutoff24h = now - 24 * 3600;
+  const since = cutoff(range);
 
   const marketRows = db
     .prepare(
@@ -482,7 +488,7 @@ export function getLiveSlate(limit = 20): SlateItem[] {
        WHERE ts >= ?
        GROUP BY marketId`
     )
-    .all(cutoff24h) as { marketId: string; volume: number | null; traders: number | null }[];
+    .all(since) as { marketId: string; volume: number | null; traders: number | null }[];
 
   const latestStateRows = db
     .prepare(
@@ -530,15 +536,15 @@ export function getLiveSlate(limit = 20): SlateItem[] {
     const boostEntry = boostMap.get(market.marketId) ?? { sponsored: 0n, unlocked: 0n };
     const outstanding = boostEntry.sponsored > boostEntry.unlocked ? boostEntry.sponsored - boostEntry.unlocked : 0n;
     const boostTotal = Number(outstanding) / 1_000_000;
-    const volume24h = (volumeInfo.volume ?? 0) / 1_000_000;
-    const uniqueTraders24h = volumeInfo.traders ?? 0;
+    const volumeRange = (volumeInfo.volume ?? 0) / 1_000_000;
+    const uniqueTraders = volumeInfo.traders ?? 0;
     const fallbackCutoff = (market.createdAt ?? now) + 72 * 3600;
     const cutoffCandidate = meta.cutoffTs ?? null;
     const cutoffTs = cutoffCandidate && cutoffCandidate > 0 ? cutoffCandidate : fallbackCutoff;
     const cutoffMultiplier = cutoffWeight(cutoffTs, now);
     const boostComponent = boostTotal * 0.4;
-    const volumeComponent = volume24h * 0.4;
-    const traderComponent = uniqueTraders24h * 0.2;
+    const volumeComponent = volumeRange * 0.4;
+    const traderComponent = uniqueTraders * 0.2;
     const edgeScore = (boostComponent + volumeComponent + traderComponent) * cutoffMultiplier;
     const edgeBreakdown: EdgeBreakdown = {
       boost: Number(boostComponent.toFixed(3)),
@@ -551,9 +557,10 @@ export function getLiveSlate(limit = 20): SlateItem[] {
       marketId: market.marketId,
       title,
       cutoffTs,
+      createdAt: market.createdAt ?? null,
       boostTotal,
-      volume24h,
-      uniqueTraders24h,
+      volumeRange,
+      uniqueTraders,
       edgeScore,
       edgeBreakdown,
       tvl: state.totalUsdc,
@@ -566,7 +573,8 @@ export function getLiveSlate(limit = 20): SlateItem[] {
       priceSeries: [] as SlatePricePoint[],
       tvlSeries: [] as SlateTvlPoint[],
       costToMove: null as SlateItem["costToMove"],
-      heuristics: heuristicsSummary
+      heuristics: heuristicsSummary,
+      category: meta.category ?? null
     } satisfies SlateItem;
   });
 
@@ -631,33 +639,78 @@ export function getLiveSlate(limit = 20): SlateItem[] {
   return selected;
 }
 
-export function getActionQueue(limit = 6): ActionQueueItem[] {
+export function getMarketsTable(range: RangeKey = RANGE_DEFAULT, limit = 200): MarketTableRow[] {
+  const slate = getLiveSlate(range, limit);
+  return slate
+    .map((item) => {
+      const sparkline = item.priceSeries
+        .map((point) => point.prices?.[0])
+        .filter((value): value is number => typeof value === "number" && Number.isFinite(value))
+        .map((value) => Number(value.toFixed(4)));
+      const priceYesRaw = item.lastPrices?.[0] ?? (sparkline.length > 0 ? sparkline[sparkline.length - 1] : null);
+      if (sparkline.length === 0 && typeof priceYesRaw === "number") {
+        sparkline.push(Number(priceYesRaw.toFixed(4)));
+      }
+      const spread = item.costToMove?.deltaProb != null ? Number(item.costToMove.deltaProb.toFixed(4)) : null;
+      const costToMove = item.costToMove?.costPerPoint ?? item.costToMove?.usdc ?? null;
+      return {
+        marketId: item.marketId,
+        title: item.title,
+        category: item.category ?? null,
+        priceYes: priceYesRaw != null ? Number(priceYesRaw.toFixed(4)) : null,
+        tvl: Number(item.tvl.toFixed(2)),
+        spread,
+        costToMove: costToMove != null ? Number(costToMove.toFixed(2)) : null,
+        cutoffTs: item.cutoffTs,
+        sparkline,
+        boostTotal: Number(item.boostTotal.toFixed(2)),
+        volumeRange: Number(item.volumeRange.toFixed(2)),
+        createdAt: item.createdAt ?? null
+      } satisfies MarketTableRow;
+    })
+    .sort((a, b) => b.tvl - a.tvl);
+}
+
+export async function getActionQueue(range: RangeKey = RANGE_DEFAULT, limit = 5): Promise<ActionQueueItem[]> {
   const now = Math.floor(Date.now() / 1000);
-  const slate = getLiveSlate(80);
-  const BOOST_TARGET = 2000; // USD target for meaningful liquidity
+  const slate = getLiveSlate(range, 120);
+  if (slate.length === 0) return [];
 
-  const scored: ActionQueueItem[] = slate.map((item) => {
-    const hoursToCutoff = Math.max(0.5, (item.cutoffTs - now) / 3600);
-    const urgency = Math.min(1.5, 24 / hoursToCutoff);
+  const BOOST_TARGET = 2500;
+  const candidates = slate.map((item) => {
+    const hoursToCutoff = Math.max(0.25, (item.cutoffTs - now) / 3600);
     const boostGap = Math.max(0, BOOST_TARGET - item.boostTotal);
-    const liquidityScore = boostGap > 0 ? Math.min(1, boostGap / BOOST_TARGET) : 0;
-    const edgeComponent = Math.min(5, item.edgeScore / 10);
-    const clarityScore = item.heuristics?.clarity ?? null;
-    const clarityPenalty = clarityScore != null && clarityScore < 0.5 ? -0.5 : 0;
-    const settlementPenalty = item.heuristics?.settlementScore != null && item.heuristics.settlementScore < 0.5 ? -0.3 : 0;
-    const score = Number((edgeComponent + urgency + liquidityScore + clarityPenalty + settlementPenalty).toFixed(3));
+    const ev = Math.max(0, item.edgeScore);
+    const urgency = Math.max(0, 72 - hoursToCutoff);
+    const liquidity = boostGap;
+    return { item, hoursToCutoff, boostGap, ev, urgency, liquidity };
+  });
 
-    let action: ActionQueueItem["action"] = "monitor";
-    let rationale = "Keep monitoring market conditions.";
-    if (boostGap >= 250) {
+  const maxEv = Math.max(...candidates.map((entry) => entry.ev), 0);
+  const maxUrgency = Math.max(...candidates.map((entry) => entry.urgency), 0);
+  const maxLiquidity = Math.max(...candidates.map((entry) => entry.liquidity), 0);
+
+  const scored = candidates.map(({ item, hoursToCutoff, boostGap, ev, urgency, liquidity }) => {
+    const score = computeActionScore(ev, maxEv, urgency, maxUrgency, liquidity, maxLiquidity);
+
+    const isFresh = item.createdAt != null ? now - item.createdAt < 12 * 3600 : false;
+    let action: ActionQueueItem["action"] = "bet";
+    let rationale = `Edge ${item.edgeScore.toFixed(1)} with ${formatUsd(item.tvl)} TVL.`;
+    let ctaHref = `https://context.markets/markets/${item.marketId}`;
+
+    if (isFresh && item.tvl < 500) {
+      action = "create";
+      rationale = "Market just launched with thin liquidity. Spin up the opening book.";
+      ctaHref = "https://context.markets/create";
+    } else if (boostGap > BOOST_TARGET * 0.3) {
       action = "boost";
-      rationale = `Liquidity short by $${boostGap.toFixed(0)} to hit $${BOOST_TARGET.toFixed(0)} target.`;
-    } else if (item.edgeScore >= 35) {
+      rationale = `Short $${boostGap.toFixed(0)} vs $${BOOST_TARGET.toFixed(0)} liquidity target.`;
+    } else if (ev >= 25) {
       action = "bet";
-      rationale = `Strong edge (${item.edgeScore.toFixed(1)}) with TVL ${formatUsd(item.tvl)}.`;
-    } else if (item.costToMove && item.costToMove.costPerPoint != null && item.costToMove.costPerPoint > 0) {
+      rationale = `Edge ${ev.toFixed(1)} and ${item.volumeRange.toFixed(0)} volume this range.`;
+    } else if (item.costToMove?.costPerPoint != null && item.costToMove.costPerPoint > 0) {
       action = "boost";
-      rationale = `Cost to move 1pt is ${formatUsd(item.costToMove.costPerPoint)}, consider topping up.`;
+      rationale = `Cost to move 1pt is ${formatUsd(item.costToMove.costPerPoint)}. Tighten spread.`;
     }
 
     return {
@@ -673,19 +726,69 @@ export function getActionQueue(limit = 6): ActionQueueItem[] {
       boostGap: Number(boostGap.toFixed(2)),
       tvl: Number(item.tvl.toFixed(2)),
       costToMove: item.costToMove?.costPerPoint ?? item.costToMove?.usdc ?? null,
-      clarityScore
+      clarityScore: item.heuristics?.clarity ?? null,
+      ctaHref
     } satisfies ActionQueueItem;
   });
 
-  return scored
+  const claimEntry = await buildClaimAction();
+  const combined = claimEntry ? [claimEntry, ...scored] : scored;
+
+  return combined
     .sort((a, b) => b.score - a.score)
     .slice(0, limit);
 }
 
-export function getLiquidityHoles(limit = 16): LiquidityHoleItem[] {
+export function computeActionScore(ev: number, maxEv: number, urgency: number, maxUrgency: number, liquidity: number, maxLiquidity: number): number {
+  const normEv = maxEv > 0 ? ev / maxEv : 0;
+  const normUrgency = maxUrgency > 0 ? urgency / maxUrgency : 0;
+  const normLiquidity = maxLiquidity > 0 ? liquidity / maxLiquidity : 0;
+  return Number((0.5 * normEv + 0.3 * normUrgency + 0.2 * normLiquidity).toFixed(4));
+}
+
+async function buildClaimAction(): Promise<ActionQueueItem | null> {
+  if (!ME_ADDRESS) return null;
+  const claimable = await fetchClaimableUsd(ME_ADDRESS);
+  if (claimable == null || claimable <= 0) return null;
+  const score = Math.min(1, claimable / 500); // cap contribution to keep queue balanced
+  return {
+    marketId: `claim-${ME_ADDRESS}`,
+    title: "Claim outstanding rewards",
+    action: "claim",
+    rationale: `Claim $${claimable.toFixed(2)} before the epoch closes.`,
+    score,
+    hoursToCutoff: 0,
+    edgeScore: Number(claimable.toFixed(2)),
+    boostTotal: 0,
+    boostTarget: 0,
+    boostGap: 0,
+    tvl: 0,
+    costToMove: null,
+    clarityScore: null,
+    claimable: Number(claimable.toFixed(2)),
+    ctaHref: "https://context.markets/rewards"
+  } satisfies ActionQueueItem;
+}
+
+async function fetchClaimableUsd(address: string): Promise<number | null> {
+  const base = address.trim().toLowerCase();
+  if (!base) return null;
+  try {
+    const summary = await fetchIndexerJson<{ totals?: { claimable?: string | number } }>(`/rewards/${base}`);
+    const raw = summary?.totals?.claimable;
+    if (raw == null) return null;
+    const value = typeof raw === "string" ? parseFloat(raw) : Number(raw);
+    if (!Number.isFinite(value)) return null;
+    return Math.max(0, value);
+  } catch (error) {
+    return null;
+  }
+}
+
+export function getLiquidityHoles(range: RangeKey = RANGE_DEFAULT, limit = 16): LiquidityHoleItem[] {
   const now = Math.floor(Date.now() / 1000);
   const BOOST_TARGET = 2500;
-  return getLiveSlate(120)
+  return getLiveSlate(range, 120)
     .map((item) => {
       const hoursToCutoff = Math.max(0.5, (item.cutoffTs - now) / 3600);
       const boostGap = Math.max(0, BOOST_TARGET - item.boostTotal);
@@ -719,9 +822,9 @@ export type NearResolutionItem = {
   costToMove: SlateItem["costToMove"];
 };
 
-export function getNearResolution(): NearResolutionItem[] {
+export function getNearResolution(range: RangeKey = RANGE_DEFAULT): NearResolutionItem[] {
   const now = Math.floor(Date.now() / 1000);
-  return getLiveSlate(80)
+  return getLiveSlate(range, 80)
     .filter((item) => item.cutoffTs >= now && item.cutoffTs <= now + 3 * 86400)
     .sort((a, b) => a.cutoffTs - b.cutoffTs)
     .slice(0, 50)
@@ -1367,51 +1470,52 @@ function getIndexerStatus(): IndexerStatus | null {
 }
 
 export type KPI = {
+  key: MetricKey;
   label: string;
+  range: RangeKey;
   value: number;
   change?: number;
-  format?: "currency" | "number";
+  format: "currency" | "number";
 };
 
-export function getKpis(): KPI[] {
-  const db = getDatabase();
-  const now = Math.floor(Date.now() / 1000);
-  const cutoffDay = now - 86400;
+export function getKpis(range: RangeKey = RANGE_DEFAULT): KPI[] {
+  const database = getDatabase();
+  const since = cutoff(range);
 
-  const volumeRow = db
+  const capitalRow = database
     .prepare(
       `SELECT SUM(CAST(usdcIn AS INTEGER) - CAST(usdcOut AS INTEGER)) AS net
-       FROM trades`
+       FROM trades
+       WHERE ts >= ?`
     )
-    .get() as { net: number | null } | undefined;
+    .get(since) as { net: number | null } | undefined;
 
-  const pnlRow = db
+  const pnlRow = database
     .prepare(
       `SELECT SUM(CAST(amount AS INTEGER)) AS reward
        FROM rewards
        WHERE kind = 'claim' AND ts >= ?`
     )
-    .get(cutoffDay) as { reward: number | null } | undefined;
+    .get(since) as { reward: number | null } | undefined;
 
-  const boostBalances = computeBoostBalances(db).values();
+  const boostBalances = computeBoostBalances(database).values();
   let openRisk = 0;
+  let boostsAvailable = 0;
   for (const entry of boostBalances) {
     const outstanding = entry.sponsored > entry.unlocked ? entry.sponsored - entry.unlocked : 0n;
     openRisk += Number(outstanding) / 1_000_000;
+    boostsAvailable += Number(entry.unlocked) / 1_000_000;
   }
 
-  const bankroll = microsToNumber(volumeRow?.net ?? 0);
-  const pnlToday = microsToNumber(pnlRow?.reward ?? 0);
-  const rewardsToday = pnlToday;
+  const capital = microsToNumber(capitalRow?.net ?? 0);
+  const pnl = microsToNumber(pnlRow?.reward ?? 0);
 
-  const out: KPI[] = [
-    { label: "Global Bankroll", value: bankroll, format: "currency" },
-    { label: "Global PnL (24h)", value: pnlToday, format: "currency" },
-    { label: "Global Rewards (24h)", value: rewardsToday, format: "currency" },
-    { label: "Open Risk", value: openRisk, format: "currency" }
+  return [
+    { key: "capital", label: "Capital", range, value: capital, format: "currency" },
+    { key: "openRisk", label: "Open Risk", range, value: Number(openRisk.toFixed(2)), format: "currency" },
+    { key: "pnl", label: "PnL Today", range, value: pnl, format: "currency" },
+    { key: "boosts", label: "Boosts Available", range, value: Number(boostsAvailable.toFixed(2)), format: "currency" }
   ];
-
-  return out;
 }
 
 export type CompetitorMarketInsight = {
@@ -1448,7 +1552,7 @@ type IndexerStatus = {
 };
 
 export function getCompetitorWatch(): CompetitorEntry[] {
-  const top = getLeaderboard("14d", "total").slice(0, 5);
+  const top = getLeaderboard("30d", "total").slice(0, 5);
   const db = getDatabase();
   const recentCutoff = rangeCutoff("30d");
   const myMarkets = ME_ADDRESS ? collectAddressMarkets(db, ME_ADDRESS, recentCutoff) : new Set<string>();
@@ -1576,62 +1680,145 @@ export type EventLogEntry = {
   ts: number;
   type: string;
   description: string;
+  address?: string | null;
+  name?: string | null;
+  amount?: number | null;
+  marketId?: string | null;
+  marketTitle?: string | null;
 };
 
-export function getEventLog(limit = 50): EventLogEntry[] {
+export function getEventLog(range: RangeKey = RANGE_DEFAULT, limit = 50): EventLogEntry[] {
   const db = getDatabase();
+  const since = cutoff(range);
+
   const rewardRows = db
     .prepare(
       `SELECT block_time AS ts, wallet, amount_usdc AS amount
        FROM reward_claims
+       WHERE block_time >= ?
        ORDER BY block_time DESC
        LIMIT ?`
     )
-    .all(limit) as { ts: number; wallet: string | null; amount: string | null }[];
+    .all(since, limit) as { ts: number; wallet: string | null; amount: string | null }[];
 
   const lockRows = db
     .prepare(
-      `SELECT ts, user, type
+      `SELECT ts, user, type, marketId
        FROM locks
+       WHERE ts >= ?
        ORDER BY ts DESC
        LIMIT ?`
     )
-    .all(limit) as { ts: number; user: string; type: string }[];
+    .all(since, limit) as { ts: number; user: string | null; type: string | null; marketId: string | null }[];
 
   const tradeRows = db
     .prepare(
       `SELECT ts, marketId, trader, usdcIn, usdcOut
        FROM trades
+       WHERE ts >= ?
        ORDER BY ts DESC
        LIMIT ?`
     )
-    .all(limit) as { ts: number; marketId: string; trader: string | null; usdcIn: string | null; usdcOut: string | null }[];
+    .all(since, limit) as {
+      ts: number;
+      marketId: string;
+      trader: string | null;
+      usdcIn: string | null;
+      usdcOut: string | null;
+    }[];
 
-  const rewards = rewardRows.map<EventLogEntry>((row) => ({
-    ts: row.ts,
-    type: "reward",
-    description: `${shortenAddress(row.wallet ?? "-")} claimed $${microsToNumber(row.amount ?? 0).toFixed(2)}`
-  }));
+  const addressCache = new Map<string, string>();
+  const profileStmt = db.prepare(
+    `SELECT display_name AS displayName, x_handle AS xHandle
+     FROM profiles
+     WHERE lower(address) = ?`
+  );
 
-  const locks = lockRows.map<EventLogEntry>((row) => ({
-    ts: row.ts,
-    type: "lock",
-    description: `${shortenAddress(row.user)} ${row.type.toLowerCase()}`
-  }));
+  const formatAmountLabel = (value: number) => {
+    if (value >= 1_000) return `$${value.toFixed(0)}`;
+    if (value >= 100) return `$${value.toFixed(1)}`;
+    return `$${value.toFixed(2)}`;
+  };
+
+  const identityFor = (addr: string | null | undefined): string | null => {
+    if (!addr) return null;
+    const normalized = addr.toLowerCase();
+    if (addressCache.has(normalized)) {
+      return addressCache.get(normalized) ?? null;
+    }
+    const profile = profileStmt.get(normalized) as {
+      displayName: string | null;
+      xHandle: string | null;
+    } | undefined;
+    const name = resolveIdentity({
+      address: normalized,
+      displayName: profile?.displayName ?? null,
+      xHandle: profile?.xHandle ?? null
+    });
+    addressCache.set(normalized, name);
+    return name;
+  };
+
+  const marketTitleCacheLocal = new Map<string, string>();
+  const marketTitleFor = (marketId: string | null | undefined): string | null => {
+    if (!marketId) return null;
+    if (!marketTitleCacheLocal.has(marketId)) {
+      marketTitleCacheLocal.set(marketId, lookupMarketTitle(db, marketId));
+    }
+    return marketTitleCacheLocal.get(marketId) ?? null;
+  };
+
+  const rewards = rewardRows.map<EventLogEntry>((row) => {
+    const address = row.wallet ? row.wallet.toLowerCase() : null;
+    const amount = dollars(microsToNumber(row.amount ?? 0));
+    return {
+      ts: row.ts,
+      type: "reward",
+      description: `claimed ${formatAmountLabel(amount)}`,
+      address,
+      name: identityFor(address),
+      amount
+    } satisfies EventLogEntry;
+  });
+
+  const locks = lockRows
+    .map<EventLogEntry | null>((row) => {
+      const kind = row.type?.toLowerCase() ?? "";
+      if (kind !== "sponsored") return null;
+      const address = row.user ? row.user.toLowerCase() : null;
+      const marketId = row.marketId ?? null;
+      return {
+        ts: row.ts,
+        type: "boost",
+        description: "boosted liquidity",
+        address,
+        name: identityFor(address),
+        marketId,
+        marketTitle: marketTitleFor(marketId)
+      } satisfies EventLogEntry;
+    })
+    .filter(Boolean) as EventLogEntry[];
 
   const trades = tradeRows
     .map<EventLogEntry | null>((row) => {
       const inAmount = microsToNumber(row.usdcIn ?? 0);
       const outAmount = microsToNumber(row.usdcOut ?? 0);
       const gross = inAmount + outAmount;
-      const net = outAmount - inAmount;
       if (gross < 250) return null;
+      const net = outAmount - inAmount;
       const direction = net >= 0 ? "sold" : "bought";
-      const size = gross >= 1000 ? gross.toFixed(0) : gross.toFixed(2);
+      const amount = dollars(gross);
+      const address = row.trader ? row.trader.toLowerCase() : null;
+      const marketId = row.marketId ?? null;
       return {
         ts: row.ts,
         type: "trade",
-        description: `${shortenAddress(row.trader ?? "?")} ${direction} ~$${size} on ${row.marketId}`
+        description: `${direction} ${formatAmountLabel(amount)}`,
+        address,
+        name: identityFor(address),
+        amount,
+        marketId,
+        marketTitle: marketTitleFor(marketId)
       } satisfies EventLogEntry;
     })
     .filter(Boolean) as EventLogEntry[];
@@ -1645,6 +1832,35 @@ export function getErrorLog(): string[] {
 
 export function getMeAddress(): string | null {
   return ME_ADDRESS;
+}
+
+export function getWalletIdentity(address: string): { address: string; name: string; xHandle: string | null } | null {
+  if (!address) return null;
+  const normalized = address.trim().toLowerCase();
+  if (!normalized) return null;
+  const dbInstance = getDatabase();
+  const row = dbInstance
+    .prepare(
+      `SELECT display_name AS displayName, x_handle AS xHandle
+       FROM profiles
+       WHERE lower(address) = ?`
+    )
+    .get(normalized) as {
+      displayName: string | null;
+      xHandle: string | null;
+    } | undefined;
+
+  const name = resolveIdentity({
+    address: normalized,
+    displayName: row?.displayName ?? null,
+    xHandle: row?.xHandle ?? null
+  });
+
+  return {
+    address: normalized,
+    name,
+    xHandle: row?.xHandle ?? null
+  };
 }
 
 export type PnlRow = {
@@ -1726,6 +1942,7 @@ type MetadataInfo = {
   ruleText?: string | null;
   sourceUrls?: string[];
   heuristics?: MarketHeuristics;
+  category?: string | null;
 };
 
 function interpretMetadata(metadata?: string | null): MetadataInfo {
@@ -1761,6 +1978,8 @@ function interpretMetadata(metadata?: string | null): MetadataInfo {
       if (title) info.title = title;
       const cutoff = resolveCutoffFromMeta(parsed);
       if (cutoff) info.cutoffTs = cutoff;
+      const category = resolveCategoryFromMeta(parsed);
+      if (category) info.category = category;
       const rule = resolveRuleFromMeta(parsed);
       if (rule) info.ruleText = rule;
       const parsedSources = resolveSourcesFromMeta(parsed);
@@ -1821,6 +2040,16 @@ const TITLE_KEYS = [
   "headline",
   "summary",
   "description"
+];
+const CATEGORY_KEYS = [
+  "category",
+  "categories",
+  "topic",
+  "tag",
+  "tags",
+  "sector",
+  "league",
+  "sport"
 ];
 const TIME_KEYS = [
   "close",
@@ -1910,6 +2139,47 @@ function extractTitleFromMeta(value: unknown, seen: Set<unknown>): string | unde
 
 function resolveRuleFromMeta(value: unknown): string | undefined {
   return extractRuleFromMeta(value, new Set());
+}
+
+function resolveCategoryFromMeta(value: unknown): string | undefined {
+  return extractCategoryFromMeta(value, new Set());
+}
+
+function extractCategoryFromMeta(value: unknown, seen: Set<unknown>): string | undefined {
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (trimmed.length > 0 && trimmed.length <= 48) {
+      return trimmed;
+    }
+    return undefined;
+  }
+  if (!value || typeof value !== "object") return undefined;
+  if (seen.has(value)) return undefined;
+  seen.add(value);
+
+  if (Array.isArray(value)) {
+    for (const entry of value) {
+      const match = extractCategoryFromMeta(entry, seen);
+      if (match) return match;
+    }
+    return undefined;
+  }
+
+  const obj = value as Record<string, unknown>;
+  for (const key of Object.keys(obj)) {
+    const lower = key.toLowerCase();
+    if (CATEGORY_KEYS.includes(lower)) {
+      const candidate = extractCategoryFromMeta(obj[key], seen);
+      if (candidate) return candidate;
+    }
+  }
+
+  for (const key of Object.keys(obj)) {
+    const nested = extractCategoryFromMeta(obj[key], seen);
+    if (nested) return nested;
+  }
+
+  return undefined;
 }
 
 function extractRuleFromMeta(value: unknown, seen: Set<unknown>): string | undefined {
@@ -2106,12 +2376,6 @@ function extractTimestampFromText(text: string): number | undefined {
   }
 
   return undefined;
-}
-
-function shortenAddress(address: string | null | undefined): string {
-  if (!address) return "-";
-  const lower = address.toLowerCase();
-  return `${lower.slice(0, 6)}…${lower.slice(-4)}`;
 }
 
 export type WalletExposureRow = {

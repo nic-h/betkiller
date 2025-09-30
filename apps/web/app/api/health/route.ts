@@ -5,6 +5,7 @@ const CHAIN_ID = 8453;
 
 export async function GET() {
   const database = db();
+  const now = Math.floor(Date.now() / 1000);
 
   const cursorRow = database
     .prepare("SELECT last_block AS lastBlock, last_ts AS lastTs FROM indexer_cursor WHERE chain_id = ?")
@@ -28,10 +29,15 @@ export async function GET() {
       updatedAt?: number | null;
     } | undefined;
 
+  const lastTs = cursorRow?.lastTs ?? 0;
+  const minutesAgo = lastTs ? Math.max(0, (now - Number(lastTs)) / 60) : null;
+
   return NextResponse.json({
     chainId: CHAIN_ID,
     lastBlock: cursorRow?.lastBlock ?? 0,
-    lastTs: cursorRow?.lastTs ?? 0,
+    lastTs,
+    lastUpdatedAt: lastTs,
+    minutesAgo,
     seedMeta: {
       seedFromBlock: metaRow?.seedFromBlock ?? null,
       seedFromTs: metaRow?.seedFromTs ?? null,

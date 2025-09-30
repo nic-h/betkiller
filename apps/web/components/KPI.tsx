@@ -1,5 +1,6 @@
 import type { KPI } from "@/lib/db";
 import { formatMoney, formatNumber } from "@/lib/fmt";
+import { formatRangeLabel } from "@/lib/range";
 
 function formatValue(item: KPI): string {
   if (item.format === "number") {
@@ -20,10 +21,15 @@ export function KPIGrid({ items }: { items: KPI[] }) {
     <section className="bk-grid bk-grid-cols-1 md:bk-grid-cols-2 xl:bk-grid-cols-4 bk-gap-3">
       {items.map((item) => (
         <div
-          key={item.label}
-          className="bk-rounded-2xl bk-bg-brand-panel bk-ring-1 bk-ring-brand-ring/60 bk-p-5 bk-space-y-2"
+          key={item.key}
+          className="bk-rounded-2xl bk-bg-brand-panel bk-ring-1 bk-ring-brand-ring/60 bk-p-4 bk-space-y-2"
         >
-          <p className="bk-text-xs bk-text-brand-muted">{item.label}</p>
+          <div className="bk-flex bk-items-center bk-justify-between">
+            <p className="bk-text-xs bk-text-brand-muted">{item.label}</p>
+            <span className="bk-rounded-full bk-bg-brand-ring/40 bk-px-2 bk-py-0.5 bk-text-[11px] bk-text-brand-muted">
+              {formatRangeLabel(item.range)}
+            </span>
+          </div>
           <p className="bk-text-2xl bk-tabular-nums bk-text-brand-text">{formatValue(item)}</p>
           {typeof item.change === "number" && (
             <p

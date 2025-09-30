@@ -11,7 +11,7 @@
 - **Idempotent & resumable:** Log ingestion keyed by `(contract, txHash, logIndex)`. Re-org safety via `CONFIRMATIONS` (default 8).
 - **No synthetic data:** decode-or-drop. Un-decoded events are logged but not persisted.
 - **Config via env:** RPC keys, distributor address, etc live in environment variables (no secrets in git).
-- **UX defaults:** Dashboard defaults to 14-day window; longer ranges (24h/7d/14d/30d/YTD/All) available per module.
+- **UX defaults:** Dashboard defaults to 24h window out of the box; users can pivot to 7d or 30d ranges. (14d backfill exists strictly for bootstrap, not as a selectable window.)
 
 ---
 
@@ -24,6 +24,7 @@ apps/web     (Next.js 14 App Router + Tailwind bk- prefix) ─┘
 
 - **Indexer runtime:** `apps/indexer/src/index.ts` orchestrates log polling, adaptive batch sizing, and nightly re-snapshots. Lightweight HTTP server (`src/server/index.ts`) exposes `/health` and `/rewards/:address` for the web tier.
 - **Web runtime:** `apps/web` uses server components + route handlers (`app/api/**`) to query SQLite read-only. Design tokens live in `styles/tokens.css` (dark-only Context palette).
+- **Test runner:** Vitest (ESM entrypoint) covers helper logic; no Vite build pipeline is bundled with the project.
 - **Shared DB:** `better-sqlite3` read/write for indexer, read-only for web (path configurable via `BK_DB`).
 
 ---
@@ -186,6 +187,24 @@ apps/web     (Next.js 14 App Router + Tailwind bk- prefix) ─┘
 | Saved views write API | ✅ | API exists; UI entry point removed in current iteration. |
 | Risk chips (rule clarity/source parity) in UI | ✅ | Displayed on slate cards with clarity/source/settlement badges. |
 | Wallet exposure explorer & boost ledger UI | ✅ | Exposure table + boost ledger live with API endpoints. |
+
+### Recent Updates (May 2024)
+
+- **Range normalization:** `/api/traders` mirrors the 24h / 7d / 30d range helper. The 14-day default now only exists for initial backfill, not as an interactive filter.
+- **Reward totals parity:** `/api/rewards/[address]` returns decimal-dollar strings and `RewardClaimStatus` parses them as-is, eliminating 1e6 scaling bugs.
+- **Identity wiring:** Every wallet reference in Overview, Leaderboard (including preview), Markets table, Activity feed/log, Position card, Reward activity and Action queue resolves through `resolveIdentity` and links to `context.markets/wallets/:addr`.
+- **Market linking:** Market tiles, watchlists, near-resolution rows, reward activity, and event feeds consistently render the human-readable market title and deep-link to `context.markets/markets/:id`.
+- **Event feed enrichment:** `getEventLog` now joins profile + market metadata so the UI can show who acted, what market was touched, and the dollar amount in context.
+- **Position header polish:** The “Your Positions” card shows the resolved wallet name with a shortened address subtitle and outbound link.
+- **Doc alignment:** Specification updated to reflect the active range options and latest UI behavior.
+
+### Known Gaps / Follow-ups
+
+- **Testing:** Re-run `pnpm --filter context-edge-web test` (Vitest) after the latest refactors; suite last executed before UI identity pass.
+- **Range `all` option:** Helpers currently expose 24h/7d/30d. `all` and longer lookback windows remain backlog items.
+- **EventLog component:** Should adopt virtual scrolling once feed exceeds ~200 entries (current implementation renders full list).
+- **Action queue copy:** Rationale strings still rely on EV/boost heuristics; editorial pass desired.
+- **Saved views UI:** API remains but front-end entry point is parked.
 
 ---
 

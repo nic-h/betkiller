@@ -5,9 +5,15 @@ import type { SlateItem as SlateEntry } from "@/lib/db";
 import { formatHoursUntil, formatMoney, formatNumber } from "@/lib/fmt";
 import { Sparkline } from "@/components/Sparkline";
 
-export function LiveSlate({ initial }: { initial: SlateEntry[] }) {
-  const [entries, setEntries] = useState(initial);
+export type SlateFilter = "top" | "boosted" | "resolution" | "new";
+
+export function LiveSlate({ initial, filter = "top" }: { initial: SlateEntry[]; filter?: SlateFilter }) {
+  const [entries, setEntries] = useState(applySlateFilter(initial, filter));
   const [isPending, startTransition] = useTransition();
+
+  useEffect(() => {
+    setEntries(applySlateFilter(initial, filter));
+  }, [initial, filter]);
 
   useEffect(() => {
     const refresh = () => {
@@ -16,7 +22,7 @@ export function LiveSlate({ initial }: { initial: SlateEntry[] }) {
           .then((res) => res.json())
           .then((data) => {
             if (Array.isArray(data?.rows)) {
-              setEntries(data.rows as SlateEntry[]);
+              setEntries(applySlateFilter(data.rows as SlateEntry[], filter));
             }
           })
           .catch(() => {});
@@ -41,6 +47,34 @@ export function LiveSlate({ initial }: { initial: SlateEntry[] }) {
       </div>
     </section>
   );
+}
+
+function applySlateFilter(items: SlateEntry[], filter: SlateFilter): SlateEntry[] {
+  const limit = 24;
+  const now = Math.floor(Date.now() / 1000);
+  const clone = items.slice();
+
+  switch (filter) {
+    case "boosted": {
+      const sorted = clone.sort((a, b) => b.boostTotal - a.boostTotal);
+      return sorted.slice(0, limit);
+    }
+    case "resolution": {
+      const filtered = clone
+        .filter((item) => item.cutoffTs > now && item.cutoffTs - now <= 72 * 3600)
+        .sort((a, b) => a.cutoffTs - b.cutoffTs);
+      return filtered.length > 0 ? filtered.slice(0, limit) : clone.slice(0, limit);
+    }
+    case "new": {
+      const filtered = clone
+        .filter((item) => item.createdAt != null && now - item.createdAt <= 48 * 3600)
+        .sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0));
+      return filtered.length > 0 ? filtered.slice(0, limit) : clone.slice(0, limit);
+    }
+    case "top":
+    default:
+      return clone.slice(0, limit);
+  }
 }
 
 function SlateCard({ item }: { item: SlateEntry }) {
@@ -112,8 +146,8 @@ function SlateCard({ item }: { item: SlateEntry }) {
 
       <div className="bk-flex bk-flex-wrap bk-gap-3 bk-text-xs bk-text-brand-muted">
         <span>Boost {formatMoney(item.boostTotal)}</span>
-        <span>Vol 24h {formatMoney(item.volume24h)}</span>
-        <span>Traders 24h {item.uniqueTraders24h}</span>
+        <span>Volume {formatMoney(item.volumeRange)}</span>
+        <span>Traders {item.uniqueTraders}</span>
         {item.costToMove && (
           <span>
             Δ1pt ≈ {item.costToMove.costPerPoint != null ? formatMoney(item.costToMove.costPerPoint) : formatMoney(item.costToMove.usdc)}

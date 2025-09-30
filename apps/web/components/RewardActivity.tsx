@@ -24,7 +24,7 @@ function summarize(contribution: RewardContribution): string {
   }
 }
 
-export function RewardActivity({ splits }: { splits: RewardSplit[] }) {
+export function RewardActivity({ splits, limit = 12 }: { splits: RewardSplit[]; limit?: number }) {
   const entries = splits.flatMap((split) =>
     split.contributions.map((entry) => ({
       bucket: split.bucket,
@@ -36,7 +36,7 @@ export function RewardActivity({ splits }: { splits: RewardSplit[] }) {
     return <p className="bk-text-xs bk-text-brand-muted">No recent activity.</p>;
   }
 
-  const sorted = entries.sort((a, b) => b.ts - a.ts).slice(0, 12);
+  const sorted = entries.sort((a, b) => b.ts - a.ts).slice(0, limit);
 
   return (
     <div className="bk-space-y-2">
@@ -51,14 +51,14 @@ export function RewardActivity({ splits }: { splits: RewardSplit[] }) {
                 </span>
                 <span className="bk-text-brand-text">{summarize(entry)}</span>
               </span>
-              {entry.marketId && entry.marketTitle && (
+              {entry.marketId && (
                 <a
                   href={`https://context.markets/markets/${entry.marketId}`}
                   target="_blank"
                   rel="noreferrer"
                   className="bk-text-brand-blue hover:bk-text-brand-text"
                 >
-                  {entry.marketTitle}
+                  {entry.marketTitle ?? entry.marketId}
                 </a>
               )}
             </div>

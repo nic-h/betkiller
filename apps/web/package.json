@@ -6,24 +6,29 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "next lint"
+    "lint": "next lint",
+    "test": "vitest"
   },
   "dependencies": {
+    "@tanstack/react-virtual": "3.0.0-beta.54",
+    "better-sqlite3": "9.4.3",
     "next": "14.2.3",
     "react": "18.2.0",
     "react-dom": "18.2.0",
     "swr": "2.2.0",
-    "better-sqlite3": "9.4.3",
     "viem": "^2.7.14"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "7.6.9",
     "@types/node": "20.12.7",
     "@types/react": "18.2.35",
     "@types/react-dom": "18.2.15",
     "autoprefixer": "10.4.17",
+    "eslint": "8.57.0",
+    "eslint-config-next": "14.2.3",
     "postcss": "8.4.38",
     "tailwindcss": "3.4.3",
     "typescript": "5.4.5",
-    "@types/better-sqlite3": "7.6.9"
+    "vitest": "1.6.0"
   }
 }

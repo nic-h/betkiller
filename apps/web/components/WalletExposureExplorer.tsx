@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState, useTransition } from "react";
 import type { BoostLedgerRow, WalletExposureRow } from "@/lib/db";
-import { formatMoney } from "@/lib/fmt";
+import { formatDateTime, formatMoney } from "@/lib/fmt";
 
 export function WalletExposureExplorer({
   initialExposure,
@@ -145,7 +145,7 @@ export function WalletExposureExplorer({
                   >
                     {entry.marketId}
                   </a>
-                  <span className="bk-text-2xs bk-text-brand-muted">{new Date(entry.ts * 1000).toLocaleString()}</span>
+                  <span className="bk-text-2xs bk-text-brand-muted">{formatDateTime(entry.ts)}</span>
                 </div>
                 <div className="bk-grid bk-grid-cols-2 bk-gap-2 bk-text-2xs bk-text-brand-muted">
                   <Metric label="Sets" value={formatMoney(entry.setsAmount)} />

@@ -1,7 +1,7 @@
 'use client';
 
-import { useEffect, useMemo, useState } from "react";
-import { formatMoney } from "@/lib/fmt";
+import { useEffect, useState } from "react";
+import { formatDateTime, formatMoney } from "@/lib/fmt";
 
 type RewardTotals = {
   claimable: string;
@@ -26,14 +26,23 @@ type RewardSummaryResponse = {
   providerSyncedAt?: number | null;
 };
 
-function microsToNumber(value: string | number | null | undefined): number {
+function parseAmount(value: string | number | null | undefined): number {
   if (value == null) return 0;
-  try {
-    return Number(BigInt(value)) / 1_000_000;
-  } catch (error) {
-    const parsed = Number(value);
-    return Number.isFinite(parsed) ? parsed : 0;
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? value : 0;
   }
+  const str = value.trim();
+  if (!str) return 0;
+  if (str.includes(".")) {
+    const decimal = Number(str);
+    return Number.isFinite(decimal) ? decimal : 0;
+  }
+  const integer = Number(str);
+  if (!Number.isFinite(integer)) return 0;
+  if (Math.abs(integer) >= 1_000_000) {
+    return integer / 1_000_000;
+  }
+  return integer;
 }
 
 type Status =
@@ -90,15 +99,12 @@ export function RewardClaimStatus({ address }: { address: string | null }) {
   }
 
   const { summary } = status;
-  const claimable = microsToNumber(summary.totals.claimable);
-  const claimed = microsToNumber(summary.totals.claimed);
-  const pending = microsToNumber(summary.totals.pending);
-  const pendingEpochs = useMemo(
-    () => summary.epochs.filter((epoch) => epoch.status === "pending" && microsToNumber(epoch.claimable) > 0),
-    [summary.epochs]
-  );
-  const providerSyncedAt = summary.providerSyncedAt ? new Date(summary.providerSyncedAt * 1000).toLocaleString() : "Not yet synced";
-  const indexerSyncedAt = summary.syncedAt ? new Date(summary.syncedAt * 1000).toLocaleString() : "Unknown";
+  const claimable = parseAmount(summary.totals.claimable);
+  const claimed = parseAmount(summary.totals.claimed);
+  const pending = parseAmount(summary.totals.pending);
+  const pendingEpochs = summary.epochs.filter((epoch) => epoch.status === "pending" && parseAmount(epoch.claimable) > 0);
+  const providerSyncedAt = summary.providerSyncedAt ? formatDateTime(summary.providerSyncedAt) : "Not yet synced";
+  const indexerSyncedAt = summary.syncedAt ? formatDateTime(summary.syncedAt) : "Unknown";
 
   return (
     <div className="bk-space-y-3">
@@ -133,7 +139,7 @@ export function RewardClaimStatus({ address }: { address: string | null }) {
             {pendingEpochs.map((epoch) => (
               <li key={epoch.epochId} className="bk-flex bk-justify-between bk-text-2xs bk-text-brand-muted bk-tabular-nums">
                 <span>Epoch {epoch.epochId}</span>
-                <span>{formatMoney(microsToNumber(epoch.claimable))}</span>
+                <span>{formatMoney(parseAmount(epoch.claimable))}</span>
               </li>
             ))}
           </ul>

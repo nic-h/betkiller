@@ -1,17 +1,20 @@
 import { NextResponse } from "next/server";
 import { getLiveSlate } from "@/lib/db";
+import { ensureRange } from "@/lib/range";
 
 const CHAIN_ID = 8453;
 
-export async function GET() {
+export async function GET(request: Request) {
+  const { searchParams } = new URL(request.url);
+  const range = ensureRange(searchParams.get("range"));
   try {
-    const rows = getLiveSlate().map((item) => ({
+    const rows = getLiveSlate(range).map((item) => ({
       marketId: item.marketId,
       title: item.title,
       cutoffTs: item.cutoffTs,
       boostTotal: item.boostTotal,
-      volume24h: item.volume24h,
-      uniqueTraders24h: item.uniqueTraders24h,
+      volumeRange: item.volumeRange,
+      uniqueTraders: item.uniqueTraders,
       edgeScore: item.edgeScore,
       edgeBreakdown: item.edgeBreakdown,
       tvl: item.tvl,
@@ -26,7 +29,7 @@ export async function GET() {
       costToMove: item.costToMove,
       heuristics: item.heuristics
     }));
-    return NextResponse.json({ chainId: CHAIN_ID, rows });
+    return NextResponse.json({ chainId: CHAIN_ID, range, rows });
   } catch (error) {
     return NextResponse.json({ chainId: CHAIN_ID, error: "failed_to_fetch" }, { status: 500 });
   }

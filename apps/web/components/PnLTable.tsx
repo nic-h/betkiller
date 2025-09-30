@@ -3,6 +3,7 @@
 import { useEffect, useState, useTransition } from "react";
 import type { LeaderboardRange, PnlRow } from "@/lib/db";
 import { formatMoney } from "@/lib/fmt";
+import { RANGE_OPTIONS, formatRangeLabel } from "@/lib/range";
 
 function XIcon({ className }: { className?: string }) {
   return (
@@ -21,7 +22,7 @@ function XIcon({ className }: { className?: string }) {
   );
 }
 
-const RANGES: LeaderboardRange[] = ["24h", "7d", "14d", "30d", "ytd", "all"];
+const RANGES: LeaderboardRange[] = [...RANGE_OPTIONS];
 
 export function PnLTable({
   dense = false,
@@ -34,7 +35,7 @@ export function PnLTable({
 }) {
   const [rows, setRows] = useState(initialRows);
   const allowedRanges = new Set<LeaderboardRange>(RANGES);
-  const safeInitialRange = allowedRanges.has(initialRange) ? initialRange : "14d";
+  const safeInitialRange = allowedRanges.has(initialRange) ? initialRange : RANGES[0];
   const [range, setRange] = useState<LeaderboardRange>(safeInitialRange);
   const [isPending, startTransition] = useTransition();
 
@@ -44,18 +45,16 @@ export function PnLTable({
         .then((res) => res.json())
         .then((data) => {
           if (Array.isArray(data?.rows)) {
-            const parsed = (data.rows as any[]).map((row) => ({
-              ...row,
-              reward: Number(row.reward ?? 0) / 1_000_000,
-              netFlow: Number(row.netFlow ?? 0) / 1_000_000,
-              pnl: Number(row.pnl ?? 0) / 1_000_000
-            }));
-            setRows(parsed as PnlRow[]);
+            setRows(data.rows as PnlRow[]);
           }
         })
         .catch(() => {});
     });
   }, [range]);
+
+  useEffect(() => {
+    setRows(initialRows);
+  }, [initialRows]);
 
   const pad = dense ? "bk-px-2 bk-py-1.5" : "bk-px-3 bk-py-2";
   const tableText = dense ? "bk-text-xs" : "bk-text-sm";
@@ -69,9 +68,7 @@ export function PnLTable({
           <p className="bk-text-xs bk-text-brand-muted">Net rewards and trade flows</p>
         </div>
         <div className="bk-flex bk-gap-2">
-          {RANGES.map((value) => {
-            const label = value === "ytd" ? "YTD" : value === "all" ? "All" : value.toUpperCase();
-            return (
+          {RANGES.map((value) => (
             <button
               key={value}
               className={`bk-rounded-full bk-px-3 bk-py-1.5 bk-text-xs bk-font-medium ${
@@ -79,9 +76,9 @@ export function PnLTable({
               }`}
               onClick={() => setRange(value)}
             >
-              {label}
+              {formatRangeLabel(value)}
             </button>
-          );})}
+          ))}
         </div>
       </header>
       <div className="bk-border bk-border-brand-ring/60 bk-rounded-xl bk-overflow-auto">

@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { db, cutoff, hasTable } from "@/lib/db";
+import { ensureRange } from "@/lib/range";
 
 const CHAIN_ID = 8453;
 
@@ -19,8 +20,7 @@ const SORTABLE = new Set(["pnl", "volume", "rewards"]);
 
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
-  const range = (searchParams.get("range") ?? "14d").toLowerCase();
-  const since = cutoff(range);
+  const { range, since } = resolveRange(searchParams.get("range"));
   const sortParam = searchParams.get("sort") ?? "pnl";
   const sort = SORTABLE.has(sortParam) ? sortParam : "pnl";
   const limit = Number(searchParams.get("limit") ?? 100);
@@ -146,4 +146,9 @@ export async function GET(request: Request) {
       lastSeen: row.lastSeen ?? 0
     }))
   });
+}
+
+function resolveRange(value: string | null): { range: string; since: number } {
+  const normalized = ensureRange(value);
+  return { range: normalized, since: cutoff(normalized) };
 }
