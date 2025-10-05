@@ -1,0 +1,34 @@
+{
+  "wallets": [
+    {
+      "addr": "0xcd2068e213101bd929fe17d6d3cd83349a53f377",
+      "expect": {
+        "cash_fp": "-9629995941",
+        "claims_fp": "0",
+        "boosts_fp": "9629995941",
+        "mtm_open_fp": "0",
+        "total_buys_fp": "0",
+        "winnings_fp": "0",
+        "rewards_fp": "0",
+        "refunds_fp": "0",
+        "win_loss_fp": "0",
+        "epv_fp": "-9629995941"
+      }
+    },
+    {
+      "addr": "0xe8e5dc8c7c8fd6bfce5e614e02f42e9cf8b72276",
+      "expect": {
+        "cash_fp": "0",
+        "claims_fp": "0",
+        "boosts_fp": "0",
+        "mtm_open_fp": "0",
+        "total_buys_fp": "0",
+        "winnings_fp": "0",
+        "rewards_fp": "0",
+        "refunds_fp": "0",
+        "win_loss_fp": "0",
+        "epv_fp": "0"
+      }
+    }
+  ]
+}

@@ -19,9 +19,10 @@
     "baseUrl": ".",
     "paths": {
       "@/*": [
-        "./*"
+        "./src/*"
       ]
     },
+    "types": ["vitest/globals", "node"],
     "incremental": true,
     "plugins": [
       {

@@ -14,4 +14,7 @@ apps/indexer/data/*
 !apps/indexer/data/context_profiles.jsonl
 !apps/indexer/data/context_summary.json
 .env
+.env.local
+apps/web/.env.local
+apps/web/.env.private
 *.log

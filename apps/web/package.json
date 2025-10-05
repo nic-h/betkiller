@@ -7,6 +7,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
+    "pretest": "pnpm --workspace-root fetch-abi && pnpm --workspace-root verify-abi && pnpm --workspace-root copy-abi",
     "test": "vitest"
   },
   "dependencies": {
@@ -16,7 +17,8 @@
     "react": "18.2.0",
     "react-dom": "18.2.0",
     "swr": "2.2.0",
-    "viem": "^2.7.14"
+    "viem": "^2.7.14",
+    "zod": "^3.25.76"
   },
   "devDependencies": {
     "@types/better-sqlite3": "7.6.9",

@@ -3,11 +3,18 @@
   "private": true,
   "version": "0.0.1",
   "scripts": {
-    "copy-abis": "node scripts/copy-abis.js"
+    "copy-abi": "node scripts/copy-abis.js",
+    "fetch-abi": "node scripts/fetch-abi.mjs",
+    "verify-abi": "node scripts/verify-abi.mjs",
+    "full-sync": "tsx --tsconfig apps/web/tsconfig.json scripts/full-sync.ts"
   },
   "workspaces": [
     "contracts",
     "apps/*",
     "scripts"
-  ]
+  ],
+  "devDependencies": {
+    "tsx": "4.19.0",
+    "vite-tsconfig-paths": "^5.1.4"
+  }
 }
