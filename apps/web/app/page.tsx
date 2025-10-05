@@ -1,7 +1,7 @@
-"use client";
+import HomePage from "@/pages/index";
 
-import DashboardPage from "@/pages/index";
+export const metadata = {
+  title: "Context Wallet Dash"
+};
 
-export default function Page() {
-  return <DashboardPage />;
-}
+export default HomePage;
