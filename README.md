@@ -1,64 +1,74 @@
-# Context Edge
+# Context Edge Dashboard
 
-Development workspace for the Context Markets dashboard and indexer.
+Server-rendered dashboard for Context Markets. Surfaces real boost, TVL, ROI and wallet stats straight from the local SQLite snapshot.
 
 ## Prerequisites
 
 - Node.js 18+
 - pnpm 8+
-- Foundry (for `forge build`)
+- SQLite database exported by the Context indexer (`data/context.db` in this repo)
 
-## One-time setup
+## Install & Run
 
 ```bash
-# Install dependencies (requires network access)
 pnpm install
-
-# Build contract artifacts so ABIs are available
-cd contracts && forge build && cd ..
-
-# Copy verified ABIs into the web and indexer apps
-pnpm copy-abis
-```
-
-> Tip: Re-run `pnpm copy-abis` whenever you rebuild the contracts to keep the generated ABIs in sync.
-
-Environment files are pre-populated for Base mainnet deployments:
-
-- `apps/indexer/.env`
-- `apps/web/.env.local`
-
-Key indexer settings live in `apps/indexer/.env`:
-- `LOOKBACK_DAYS` to control the historical window (defaults to 14)
-- `CONTEXT_BASE` and `PROFILE_SCRAPE` enable automatic profile enrichment
-- `PROFILE_TTL_SECONDS` / `PROFILE_CONCURRENCY` tune Context profile fetch cadence
-
-For the dashboard (`apps/web/.env.local`):
-- `BK_DB` points to the SQLite database (e.g. `../indexer/data/context-edge.db`)
-- `BK_ME` is your wallet for the personal panels
-- `NEXT_PUBLIC_BASE_URL` defaults to `http://localhost:3000` for local preview
-
-## Running the stack
-
-```bash
-# Terminal 1 – viem/SQLite indexer
-pnpm --filter apps/indexer dev
-
-# Terminal 2 – Next.js dashboard
 pnpm --filter apps/web dev
 ```
 
-The indexer writes to `data/context-edge.db`. The web app reads from the same path for API routes and page rendering.
+By default the web app reads `../../data/context.db`. Override with `SQLITE_PATH` / `BK_DB` in `apps/web/.env.local` if your database lives elsewhere. Set `BK_ME` to a wallet address to enable the user drawer.
 
-## Generated artifacts
+## Features (v0.2)
 
-- `scripts/copy-abis.js` keeps ABIs in sync with `contracts/out`
-- `apps/indexer` contains the viem-based indexer (poller + log processing)
-- `apps/web` is a Tailwind-styled single-page dashboard (App Router)
+- **Markets panel** – Ranks markets by outstanding boost and TVL, shows 24h volume, edge score, latest price, and the largest YES/NO holders (with platform ROI rank pulled from the leaderboard).
+- **ROI-weighted leaderboard** – Top 50 wallets by `(PnL + rewards) × log10(capital)` including raw capital at risk, rewards, volume, trade count, and ROI%.
+- **Recent activity rail** – Last eight boosts, trades, or reward claims within the selected range.
+- **User drawer** – Slide-out snapshot for the configured `BK_ME` wallet (capital, boosts, PnL, rewards, ROI rank).
 
-## Specs & Features
+Everything renders on the server against the SQLite file—no background polling or brittle remote fetches.
 
-Detailed app documentation lives under [`docs/`](./docs):
+## Environment Variables (`apps/web/.env.local`)
 
-- [`app-spec.md`](./docs/app-spec.md) – human-readable rundown of the indexer, dashboard surfaces, APIs, schema, and runbook.
-- [`app-spec.llm.md`](./docs/app-spec.llm.md) – LLM-friendly YAML summary you can drop into new chats.
+| Variable      | Description                                                   |
+| ------------- | ------------------------------------------------------------- |
+| `SQLITE_PATH` | Absolute/relative path to the SQLite database (default `../../data/context.db`) |
+| `BK_DB`       | Alternative alias for the same database path                  |
+| `BK_ME`       | Wallet address to populate the user drawer                    |
+| `RPC_URL`     | Base RPC endpoint (set in `.env.local`, keep private)         |
+
+Store private keys and RPC URLs in `apps/web/.env.private` (gitignored) and, if needed, mirror the non-sensitive entries into `.env.local` for local development.
+
+## Validation
+
+Spot-check the data layer with the existing snapshot:
+
+```bash
+# Top markets by boost
+sqlite3 data/context.db "SELECT marketId, SUM(CAST(usdcIn AS INTEGER))-SUM(CAST(usdcOut AS INTEGER)) AS net FROM trades GROUP BY marketId ORDER BY net DESC LIMIT 5;"
+
+# Wallet ROI components
+sqlite3 data/context.db "SELECT lower(trader) addr, SUM(CAST(usdcOut AS INTEGER))-SUM(CAST(usdcIn AS INTEGER)) pnl FROM trades GROUP BY addr ORDER BY pnl DESC LIMIT 5;"
+```
+
+Refer to [`docs/dashboard.md`](./docs/dashboard.md) for a deeper explanation of the calculations and response shapes.
+
+## Test Instrumentation & ABI Preflight
+
+The web test suite now fails closed. Every run verifies on-chain ABIs, copies them into the app, and points Vitest at a deterministic SQLite fixture. Run the following from repo root:
+
+```bash
+# 1. Fetch & verify ABIs, then copy them into apps/web/src/abi
+export BASESCAN_KEY=...   # or ETHERSCAN_KEY
+pnpm fetch-abi
+pnpm verify-abi
+
+# 2. Run the web test suite (setup.ts assigns DB_PATH to the fixture)
+pnpm --filter context-edge-web test
+```
+
+During the test run you should see logs similar to:
+
+```
+[vitest] DB_PATH = /path/to/apps/web/tests/fixtures/context.test.sqlite
+```
+
+If the fixture is missing the setup script warns but the tests continue against the fallback database. Populate `apps/web/tests/fixtures/context.test.sqlite` with the minimal tables used in `tests/dashboard.test.ts` (`trades`, `identity_map`, `locks`) to reproduce the production calculations locally.
