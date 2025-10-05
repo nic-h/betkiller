@@ -1,4 +1,4 @@
-export { getDatabase, resolveDatabasePath } from "@/lib/database";
+export { getDatabase, resolveDatabasePath, getDatabase as getDb } from "@/lib/database";
 export type { LeaderboardRow, LeaderboardIndex } from "@/lib/leaderboard";
 export { getLeaderboard, buildLeaderboardIndex } from "@/lib/leaderboard";
 export type { MarketSummary } from "@/lib/markets";
